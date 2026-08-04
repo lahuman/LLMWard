@@ -1,0 +1,25 @@
+{
+  "name": "llm-gateway",
+  "version": "1.0.0",
+  "description": "Lightweight on-premises LLM gateway",
+  "main": "server.js",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "start": "node server.js",
+    "test": "node --test",
+    "setup": "node scripts/setup.js",
+    "doctor": "node scripts/doctor.js",
+    "backup": "node scripts/backup.js",
+    "benchmark": "node scripts/benchmark.js"
+  },
+  "license": "MIT",
+  "dependencies": {
+    "better-sqlite3": "^13.0.2",
+    "cors": "^2.8.6",
+    "dotenv": "^17.4.2",
+    "express": "^5.2.1",
+    "winston": "^3.19.0"
+  }
+}
