@@ -9,21 +9,23 @@ LLMWard는 한 관리자와 100명 이하 사용자를 전제로 한 단일 Node
 | 사용자 → Gateway | 사용자 토큰, 모델 권한, quota | Bearer token hash 조회, 활성/만료 검사, body 1 MiB 제한, 요청별 멱등 cleanup | 인증 우회, 제한 경쟁, disconnect |
 | 관리자 → 관리 API | 관리자 키, 공급자 설정, 사용자·토큰 | 명시적 CORS, header key, timing-safe 비교, prepared SQL, CSP·no-store·safe DOM sink | 브라우저 헤더, XSS, 감사 로그, 위험 작업 |
 | Gateway → 공급자 | 공급자 키, 내부망 목적지, 요청 본문 | canonical 등록 URL만 사용, 고정 endpoint 결합, 새 Authorization 구성, redirect manual, abort | URL 우회, endpoint 결합, streaming lifecycle |
-| Gateway → SQLite/로그/백업 | token hash, 사용량, 감사 데이터 | prepared SQL, WAL, fail-closed migration, body 미저장, 검증 후 게시하는 온라인 backup | schema/FK 위반, 원문 잔존, 복원 검증 |
+| Gateway → SQLite/로그/백업 | token hash, 사용량, 감사 데이터 | prepared SQL, future-schema readonly preflight, 고정 audit metadata, owner-only·검증 후 게시하는 온라인 backup | schema/FK 위반, 원문 잔존, 복원 검증·권한 |
 
 ## 확인된 안전 속성
 
 - 사용자 token 원문은 신규 발급 응답에만 반환되고 `user_tokens.token_hash`에는 SHA-256 hash가 저장된다.
 - 사용자 Authorization header를 upstream에 복사하지 않고 공급자 설정에서 새 header를 구성한다.
 - 프롬프트·응답·공급자 오류 본문을 request/audit log에 넣지 않는다.
+- 관리자 감사 metadata는 action별 고정 field name과 canonical positive safe integer target만 저장하며 실패 field 목록은 비운다.
 - SQL 값은 prepared statement로 바인딩하며 동적 SQL identifier는 고정 목록 또는 검증된 placeholder 개수에 한정된다.
 - provider redirect는 `redirect: 'manual'`로 자동 추적하지 않는다.
 - output quota 예약은 `BEGIN IMMEDIATE` transaction으로 직렬화되어 동시 oversubscription을 방지한다.
 - 성공, 오류, timeout, downstream disconnect, shutdown은 같은 멱등 cleanup 경로로 quota와 concurrency를 해제한다.
 - provider Base URL은 query, fragment, 자격증명, traversal, 인코딩 경로 구분자를 거부하고 고정 endpoint를 URL API로 결합한다.
-- migration은 미래 schema, integrity, foreign-key, 필수 컬럼 위반을 거부하고 legacy token을 secure-delete transaction에서 hash marker로 바꾸며 startup `VACUUM`을 실행하지 않는다.
-- backup은 게시 전에 독립 연결에서 integrity, foreign key, 정확한 schema version을 검사하며 `verify-backup` 명령으로 복원 후보를 읽기 전용 검증한다.
+- migration은 journal 변경 전 readonly preflight와 writable-open 재검사로 미래 schema를 거부하고 integrity, foreign-key, 필수 컬럼 위반을 fail closed 처리하며 startup `VACUUM`을 실행하지 않는다.
+- backup은 `0o600`으로 생성하고 게시 전에 독립 연결에서 integrity, foreign key, 정확한 schema version을 검사하며 `verify-backup` 명령으로 복원 후보를 읽기 전용 검증한다.
 - 관리자 응답은 CSP, frame 방지, nosniff, referrer, no-store 정책을 적용하고 dashboard는 외부 asset과 안전한 DOM sink를 사용한다.
+- Docker build context는 환경 파일, SQLite·backup·coverage·log와 로컬 scratch directory를 루트 및 중첩 경로에서 제외한다.
 - doctor는 DB·디렉터리·runtime 상태를 PASS/WARN/FAIL로 구분하고 비밀 값을 출력하지 않는다. CI와 Compose 정의는 Node 22와 최소 권한 구성을 정적으로 검증한다.
 
 ## 의도적으로 남는 위험

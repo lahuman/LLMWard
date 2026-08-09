@@ -73,3 +73,33 @@
   - doctor와 backup은 생성한 temp 디렉터리와 명시적 `DATABASE_PATH`만 사용하고 종료 후 삭제했다.
   - benchmark는 자체 temp DB와 loopback mock provider만 사용했다.
   - 운영 `data/gateway.db`, `.env`, 실제 자격증명, 실제 공급자에는 접근하지 않았다.
+
+## 체크포인트 3 — 최종 리뷰 안전 간극 수정
+
+- 작업 기준:
+  - 시작 HEAD `4dafd1392d7ad1f91afcf8860d62140b273ef77e`, 코드·테스트 커밋 `ef77d60b4ba42d0f78e438289ca0dcc32621f718`
+  - package와 lockfile root version `1.0.1`, dependency 변경과 생성된 HEAD tag 없음
+- 최종 리뷰 수정:
+  - 기존 DB를 readonly·`fileMustExist`로 preflight하고 writable open 뒤에도 schema를 재검사한 후에만 WAL을 적용한다. 모든 setup error에서 연결을 닫고 migration 내부 검사는 유지했다.
+  - backup temporary artifact를 `0o600`으로 생성해 hard-link publication 뒤에도 owner-only 권한을 유지한다.
+  - `.dockerignore`가 환경 변형, coverage, SQLite DB/WAL/SHM, backup, log/out/err/npm debug, scratch directory를 루트와 중첩 경로에서 제외한다.
+  - 관리자 감사 성공 field를 action별 고정 allowlist로 제한하고, 실패 field는 비우며 canonical positive safe integer target만 보존한다.
+- RED 증거:
+  - 미래 schema focused test: 1 failure, exit 1, wall 0.544초; 거부 뒤 journal mode가 `delete`가 아니라 `wal`
+  - backup permission focused test: 1 failure, exit 1, wall 0.780초; production `openSync` mode가 `0o600`이 아니라 `undefined`
+  - Docker context focused test: 1 failure, exit 1, wall 0.598초; `.env.*` 누락. 독립 리뷰 뒤 recursive 계약 test도 1 failure, exit 1, wall 0.279초
+  - audit privacy focused test: 2 failures, exit 1, wall 7.557초; 성공·실패의 unknown property name이 저장됨. 독립 리뷰 뒤 canonical failure target test도 1 failure, exit 1, wall 0.783초
+- GREEN 증거:
+  - 최초 focused: migration 1/1 (wall 0.477초), backup 1/1 (0.596초), Docker 1/1 (0.245초), audit 2/2 (0.777초)
+  - 전체 focused files: migrations 9/9 (wall 1.931초), backup 15/15 (4.374초), operations 10/10 (1.586초)
+  - 독립 리뷰 수정 뒤: recursive Docker 1/1 (wall 0.260초), audit privacy 3/3 (0.815초), operations 10/10 (1.489초), gateway 38/38 (5.761초)
+  - 최종 `npm.cmd test`: 75/75, exit 0, wall 8.679초, TAP 8.074초
+- 독립 리뷰:
+  - 최초 판정 0 Critical, 2 Important, 1 Minor. 재귀 Docker 패턴과 유효 실패 target 보존 두 Important를 수정했다.
+  - POSIX 최종 mode를 정확히 `0600`으로 비교하라는 Minor 제안은 더 엄격한 umask가 owner bit를 줄일 수 있어 적용하지 않았다. production mode 인자 `0o600`과 effective group/other bit 0을 각각 검증한다.
+  - 수정 후 재검토에서 남은 Critical/Important 없음, Ready 판정.
+- 불변조건과 제한:
+  - `docs/audit/BASELINE.md` SHA-256은 변경 전과 코드 커밋 후 모두 `C8E152CA33D4B5A00C54E6890AEC14344120776543DBEF4A8521BEE74D67E412`
+  - `git diff --check` 통과, 금지된 secret/DB/log/backup/coverage 추적 파일 없음
+  - Docker runtime 검증은 CLI 부재로 실행하지 않았고 `.dockerignore` 및 Dockerfile 계약을 정적으로 검증했다.
+  - 테스트는 temp directory·temp SQLite·loopback mock provider만 사용했다. 운영 DB, `.env`, 실제 자격증명과 공급자에는 접근하지 않았다.

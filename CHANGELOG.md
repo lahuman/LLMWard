@@ -8,6 +8,7 @@
 - Made SQLite migrations fail closed, preserved quota reservation dates, and removed automatic startup `VACUUM`.
 - Added integrity, foreign-key, and schema-verified backup and independent restore checks.
 - Added browser security headers and safe DOM rendering, race-safe setup, stronger diagnostics, CI, and hardened Compose definitions.
+- Rejected future SQLite schemas before journal changes, made backup artifacts owner-only, excluded nested local artifacts from Docker contexts, and constrained audit metadata to fixed fields.
 
 ## 1.0.0 - 2026-08-04
 
