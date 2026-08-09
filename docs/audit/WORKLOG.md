@@ -103,3 +103,33 @@
   - `git diff --check` 통과, 금지된 secret/DB/log/backup/coverage 추적 파일 없음
   - Docker runtime 검증은 CLI 부재로 실행하지 않았고 `.dockerignore` 및 Dockerfile 계약을 정적으로 검증했다.
   - 테스트는 temp directory·temp SQLite·loopback mock provider만 사용했다. 운영 DB, `.env`, 실제 자격증명과 공급자에는 접근하지 않았다.
+
+## 체크포인트 4 — 최종 리뷰 수정 Round 2
+
+- 작업 기준:
+  - 시작 HEAD `b1d1511b66c25d4004308286a2160f9f5a3607bd`, 코드·테스트 커밋 `ed0498f5f458863f05258dcf4664dbf474dbccf1`
+  - branch `audit/codex-hardening-release`, package/lockfile version `1.0.1`, dependency 변경과 생성된 HEAD tag 없음
+- 이전 체크포인트 정정 및 수정:
+  - 이전 readonly SQLite handle 설명을 O_RDONLY 100-byte file header 및 private main/WAL copy preflight로 교체했다. real target은 호환성 확인 전 SQLite로 열지 않으며 real SHM은 복사하지 않는다.
+  - private directory/main/WAL은 POSIX에서 각각 `0700`/`0600`으로 제한한다. close와 recursive cleanup은 `finally`에서 수행하며 cleanup 실패는 path/detail 없이 fail closed한다. host가 삭제를 거부하면 private copy가 운영자 제거 시점까지 남을 수 있다.
+  - `.dockerignore`에 root/recursive `.sqlite`, `.sqlite3`, generic `-wal`, `-shm`, `-journal`, `.bak`, `.backup` 계약과 대표 경로 match 회귀를 추가했다.
+  - 실패 audit family를 case-insensitive fixed allowlist와 `admin` fallback으로 제한했다. known user/model/provider family만 canonical positive safe integer ID를 보존한다.
+  - 이전 owner-only 표현을 POSIX backup `0o600` 범위로 정정했다. Windows는 data/backup/restore-staging의 보호 NTFS ACL을 Gateway 서비스 계정으로 제한하는 배포 책임이 남는다.
+- RED:
+  - checkpointed/dirty WAL 및 cleanup focused: 0/3, exit 1, TAP 888.4524 ms. clean fixture는 sidecar가 생겼고 interrupted dirty fixture는 SHM bytes가 바뀌었으며 cleanup failure는 generic preflight 오류가 아니었다.
+  - Docker context: 0/1, exit 1, TAP 147.0744 ms. 첫 누락은 root `*.sqlite`였다.
+  - unknown admin family: 0/1, exit 1, TAP 664.8087 ms. complete failure row에 dynamic route family가 남았다.
+  - case-insensitive known family: 0/1, exit 1, TAP 785.8551 ms. `/USERS/:id`가 `admin.change`와 null ID로 잘못 분류됐다.
+- GREEN:
+  - WAL focused 3/3, TAP 697.3172 ms; 실제 pre-delete cleanup failure test 1/1, TAP 355.7928 ms
+  - Docker focused 1/1, TAP 129.8395 ms
+  - unknown family focused 1/1, TAP 647.6555 ms; fallback+case family focused 2/2, TAP 697.0388 ms
+  - full migrations 12/12, TAP 2156.4893 ms; backup 15/15, TAP 4636.5222 ms; operations 10/10, TAP 1558.9475 ms; gateway 40/40, TAP 5857.1602 ms
+  - 최종 `npm.cmd test`: 80/80, exit 0, wall 10.901초, TAP 10224.0745 ms
+- 독립 review:
+  - cleanup fault test gap과 Express case-insensitive routing 분류 gap 두 Important를 수정했다.
+  - 최종 재검토: 0 Critical, 0 Important, 0 Minor, Ready.
+- 제한과 안전:
+  - Docker CLI가 없어 runtime image/Compose 검증은 실행하지 않았다. 대표 build-context 경로를 정적으로 검증했다.
+  - 모든 fixture는 temp directory, temp SQLite, loopback mock provider만 사용했다. `.env`, 운영 `data/gateway.db`, 실제 secret/provider/log/backup을 읽거나 출력하지 않았다.
+  - Windows ACL은 제품이 자동 변경하지 않는다. deployment가 Gateway 서비스 계정의 effective access를 확인해야 한다.
