@@ -113,16 +113,18 @@ function assertNoSqliteSidecars(databasePath) {
   }
 }
 
-function preflightZeroLengthDatabase(databasePath) {
+function preflightNewOrZeroDatabase(databasePath) {
   assertNoSqliteSidecars(databasePath);
   let target;
   try {
     target = fs.lstatSync(databasePath);
-  } catch {
-    throw preflightFailure();
+  } catch (error) {
+    if (!error || error.code !== 'ENOENT') throw preflightFailure();
   }
-  if (!target.isFile()) throw preflightFailure();
-  if (target.size > 0) return preflightExistingDatabase(databasePath);
+  if (target) {
+    if (!target.isFile()) throw preflightFailure();
+    if (target.size > 0) return preflightExistingDatabase(databasePath);
+  }
   assertNoSqliteSidecars(databasePath);
 }
 
@@ -133,13 +135,11 @@ if (config.databasePath !== ':memory:') {
   } catch (error) {
     if (!error || error.code !== 'ENOENT') throw preflightFailure();
   }
-  if (target) {
+  if (!target || target.size === 0) {
+    preflightNewOrZeroDatabase(config.databasePath);
+  } else {
     if (!target.isFile()) throw preflightFailure();
-    if (target.size === 0) {
-      preflightZeroLengthDatabase(config.databasePath);
-    } else {
-      preflightExistingDatabase(config.databasePath);
-    }
+    preflightExistingDatabase(config.databasePath);
   }
 }
 

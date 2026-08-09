@@ -145,6 +145,40 @@ test('existing zero-length database with any SQLite sidecar fails closed', () =>
   }
 });
 
+test('missing database with any orphaned SQLite sidecar fails closed without mutation', () => {
+  const suffixes = ['-wal', '-shm', '-journal'];
+  for (const suffix of suffixes) {
+    const name = suffix.slice(1);
+    const file = databasePath(`missing-with-${name}`);
+    const sidecar = `${file}${suffix}`;
+    const privateBytes = Buffer.from(crypto.randomBytes(32).toString('base64url'));
+    fs.writeFileSync(sidecar, privateBytes, { flag: 'wx', mode: 0o600 });
+    assert.equal(fs.existsSync(file), false);
+
+    const result = migrate(file);
+    const output = `${result.stdout}${result.stderr}`;
+    const sidecarExists = fs.existsSync(sidecar);
+
+    assert.deepEqual({
+      failed: result.status !== 0,
+      genericFailure: output.includes('Database schema preflight failed'),
+      pathPrivate: !output.includes(file) && !output.includes(sidecar),
+      contentPrivate: !output.includes(privateBytes.toString()),
+      mainAbsent: !fs.existsSync(file),
+      sidecarUnchanged: sidecarExists && fs.readFileSync(sidecar).equals(privateBytes),
+      sidecarsPresent: suffixes.map((candidate) => fs.existsSync(`${file}${candidate}`))
+    }, {
+      failed: true,
+      genericFailure: true,
+      pathPrivate: true,
+      contentPrivate: true,
+      mainAbsent: true,
+      sidecarUnchanged: true,
+      sidecarsPresent: suffixes.map((candidate) => candidate === suffix)
+    });
+  }
+});
+
 test('legacy and partial schemas migrate without data loss', () => {
   const file = databasePath('legacy-partial');
   const legacy = open(file);
