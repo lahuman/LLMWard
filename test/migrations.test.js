@@ -21,7 +21,7 @@ function migrate(file, options = {}) {
   const observers = [
     forbidVacuum && "const exec=Database.prototype.exec;Database.prototype.exec=function(sql){if(/\\bVACUUM\\b/i.test(sql))throw new Error('VACUUM invoked');return exec.call(this,sql)};",
     failPostIntegrityCheck && "const pragma=Database.prototype.pragma;let integrityChecks=0;Database.prototype.pragma=function(sql,options){if(sql==='integrity_check'&&++integrityChecks===2)return [{integrity_check:'corrupt'}];return pragma.call(this,sql,options)};",
-    failPreflightCleanup && "const fs=require('node:fs');const path=require('node:path');const rmSync=fs.rmSync;const mkdtempSync=fs.mkdtempSync;fs.mkdtempSync=function(prefix,options){const directory=mkdtempSync.call(this,prefix,options);if(path.basename(prefix).startsWith('llmward-schema-preflight-')){try{fs.writeFileSync(process.env.PREFLIGHT_CONTROL_PATH,directory,{flag:'wx',mode:0o600})}catch(error){rmSync.call(fs,directory,{recursive:true,force:true});throw error}}return directory};fs.rmSync=function(target,options){if(path.basename(target).startsWith('llmward-schema-preflight-'))throw new Error('private-cleanup-marker');return rmSync.call(this,target,options)};"
+    failPreflightCleanup && "const fs=require('node:fs');const path=require('node:path');const rmSync=fs.rmSync;const mkdtempSync=fs.mkdtempSync;const isPreflight=(target)=>path.basename(target).startsWith('.llmward-schema-preflight-');fs.mkdtempSync=function(prefix,options){const directory=mkdtempSync.call(this,prefix,options);if(isPreflight(prefix)){try{fs.writeFileSync(process.env.PREFLIGHT_CONTROL_PATH,directory,{flag:'wx',mode:0o600})}catch(error){rmSync.call(fs,directory,{recursive:true,force:true});throw error}}return directory};fs.rmSync=function(target,options){if(isPreflight(target))throw new Error('private-cleanup-marker');return rmSync.call(this,target,options)};"
   ].filter(Boolean).join('');
   const script = observers
     ? `const Database=require('better-sqlite3');${observers}const {runMigrations}=require('./db/migrations');runMigrations();require('./db/database').close()`
@@ -108,6 +108,41 @@ test('empty database migrates to schema 2', () => {
   assert.equal(database.pragma('integrity_check')[0].integrity_check, 'ok');
   assert.deepEqual(database.pragma('foreign_key_check'), []);
   database.close();
+});
+
+test('existing zero-length database initializes to schema 2 without sidecars', () => {
+  const file = databasePath('zero-length');
+  fs.closeSync(fs.openSync(file, 'wx', 0o600));
+  assert.equal(fs.statSync(file).size, 0);
+  assert.deepEqual(['-wal', '-shm', '-journal'].map((suffix) => fs.existsSync(`${file}${suffix}`)), [false, false, false]);
+
+  assertMigrated(migrate(file));
+
+  const database = open(file, { readonly: true });
+  assert.equal(database.pragma('user_version', { simple: true }), 2);
+  assert.equal(database.pragma('integrity_check')[0].integrity_check, 'ok');
+  assert.deepEqual(database.pragma('foreign_key_check'), []);
+  database.close();
+});
+
+test('existing zero-length database with any SQLite sidecar fails closed', () => {
+  for (const suffix of ['-wal', '-shm', '-journal']) {
+    const name = suffix.slice(1);
+    const file = databasePath(`zero-length-with-${name}`);
+    const sidecar = `${file}${suffix}`;
+    fs.closeSync(fs.openSync(file, 'wx', 0o600));
+    fs.closeSync(fs.openSync(sidecar, 'wx', 0o600));
+
+    const result = migrate(file);
+
+    assert.notEqual(result.status, 0);
+    assert.equal(`${result.stdout}${result.stderr}`.includes('Database schema preflight failed'), true);
+    assert.equal(fs.statSync(file).size, 0);
+    assert.equal(fs.statSync(sidecar).size, 0);
+    for (const otherSuffix of ['-wal', '-shm', '-journal']) {
+      assert.equal(fs.existsSync(`${file}${otherSuffix}`), otherSuffix === suffix);
+    }
+  }
 });
 
 test('legacy and partial schemas migrate without data loss', () => {
@@ -248,8 +283,8 @@ test('WAL schema preflight cleanup failure fails closed without private details'
     const result = migrate(file, { failPreflightCleanup: true, preflightControlPath: controlPath });
     if (fs.existsSync(controlPath)) privateDirectory = fs.readFileSync(controlPath, 'utf8');
     ownsPrivateDirectory = typeof privateDirectory === 'string'
-      && path.dirname(path.resolve(privateDirectory)) === path.resolve(os.tmpdir())
-      && path.basename(privateDirectory).startsWith('llmward-schema-preflight-');
+      && path.dirname(path.resolve(privateDirectory)) === path.resolve(path.dirname(file))
+      && path.basename(privateDirectory).startsWith('.llmward-schema-preflight-');
 
     assert.notEqual(result.status, 0);
     const output = `${result.stdout}${result.stderr}`;

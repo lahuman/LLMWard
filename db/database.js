@@ -1,5 +1,4 @@
 const fs = require('fs');
-const os = require('os');
 const path = require('path');
 const Database = require('better-sqlite3');
 const config = require('../config');
@@ -61,7 +60,7 @@ function privateWalPreflight(databasePath, walPath) {
   let privateDatabase;
   let failure;
   try {
-    temporaryDirectory = fs.mkdtempSync(path.join(os.tmpdir(), 'llmward-schema-preflight-'));
+    temporaryDirectory = fs.mkdtempSync(path.join(path.dirname(databasePath), '.llmward-schema-preflight-'));
     if (process.platform !== 'win32') fs.chmodSync(temporaryDirectory, 0o700);
     const privatePath = path.join(temporaryDirectory, 'database.db');
     const privateWalPath = `${privatePath}-wal`;
@@ -103,16 +102,44 @@ function preflightExistingDatabase(databasePath) {
   if (wal.size > 0) privateWalPreflight(databasePath, walPath);
 }
 
+function assertNoSqliteSidecars(databasePath) {
+  for (const suffix of ['-wal', '-shm', '-journal']) {
+    try {
+      fs.lstatSync(`${databasePath}${suffix}`);
+    } catch (error) {
+      if (error && error.code === 'ENOENT') continue;
+    }
+    throw preflightFailure();
+  }
+}
+
+function preflightZeroLengthDatabase(databasePath) {
+  assertNoSqliteSidecars(databasePath);
+  let target;
+  try {
+    target = fs.lstatSync(databasePath);
+  } catch {
+    throw preflightFailure();
+  }
+  if (!target.isFile()) throw preflightFailure();
+  if (target.size > 0) return preflightExistingDatabase(databasePath);
+  assertNoSqliteSidecars(databasePath);
+}
+
 if (config.databasePath !== ':memory:') {
   let target;
   try {
-    target = fs.statSync(config.databasePath);
+    target = fs.lstatSync(config.databasePath);
   } catch (error) {
     if (!error || error.code !== 'ENOENT') throw preflightFailure();
   }
   if (target) {
     if (!target.isFile()) throw preflightFailure();
-    preflightExistingDatabase(config.databasePath);
+    if (target.size === 0) {
+      preflightZeroLengthDatabase(config.databasePath);
+    } else {
+      preflightExistingDatabase(config.databasePath);
+    }
   }
 }
 
