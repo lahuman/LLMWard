@@ -28,7 +28,8 @@ app.use((req, res, next) => {
   res.setHeader('X-Frame-Options', 'DENY');
   res.setHeader('X-Content-Type-Options', 'nosniff');
   res.setHeader('Referrer-Policy', 'no-referrer');
-  if (req.path === '/admin-dashboard.html' || req.path === '/admin' || req.path.startsWith('/admin/')) {
+  const requestPath = req.path.toLowerCase();
+  if (requestPath === '/admin-dashboard.html' || requestPath === '/admin' || requestPath.startsWith('/admin/')) {
     res.setHeader('Cache-Control', 'no-store');
   }
   next();

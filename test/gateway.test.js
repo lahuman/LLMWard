@@ -246,11 +246,15 @@ after(async () => {
 test('security headers and no-store protect browser and admin responses', async () => {
   const health = await request('/health');
   const dashboard = await request('/admin/');
+  const uppercaseDashboard = await request('/ADMIN/');
   const directDashboard = await request('/admin-dashboard.html');
+  const queriedDirectDashboard = await request('/admin-dashboard.html?x=1');
   const users = await admin('/admin/users');
+  const uppercaseUsers = await admin('/ADMIN/users');
+  const queriedUsers = await admin('/admin/users?x=1');
   const stylesheet = await request('/admin-dashboard.css');
   const script = await request('/admin-dashboard.js');
-  const responses = [health, dashboard, directDashboard, users, stylesheet, script];
+  const responses = [health, dashboard, uppercaseDashboard, directDashboard, queriedDirectDashboard, users, uppercaseUsers, queriedUsers, stylesheet, script];
   for (const response of responses) {
     assert.equal(response.headers.get('x-frame-options'), 'DENY');
     assert.equal(response.headers.get('x-content-type-options'), 'nosniff');
@@ -267,9 +271,17 @@ test('security headers and no-store protect browser and admin responses', async 
       "form-action 'self'"
     ].join('; '));
   }
-  assert.equal(dashboard.headers.get('cache-control'), 'no-store');
-  assert.equal(directDashboard.headers.get('cache-control'), 'no-store');
-  assert.equal(users.headers.get('cache-control'), 'no-store');
+  for (const response of [dashboard, uppercaseDashboard, directDashboard, queriedDirectDashboard, users, uppercaseUsers, queriedUsers]) {
+    assert.equal(response.status, 200);
+    assert.equal(response.headers.get('cache-control'), 'no-store');
+  }
+  for (const response of [dashboard, uppercaseDashboard, directDashboard, queriedDirectDashboard]) {
+    assert.match(response.headers.get('content-type') || '', /^text\/html\b/);
+  }
+  assert.equal(stylesheet.status, 200);
+  assert.match(stylesheet.headers.get('content-type') || '', /^text\/css\b/);
+  assert.equal(script.status, 200);
+  assert.match(script.headers.get('content-type') || '', /^(?:application|text)\/javascript\b/);
 });
 
 test('health check and admin authentication', async () => {
