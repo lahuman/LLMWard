@@ -133,11 +133,13 @@ test('SIGTERM aborts held requests and exits cleanly before the force limit', as
     : spawn(process.execPath, [serverPath], {
       cwd: temporaryDirectory, env: childEnvironment, stdio: ['ignore', 'pipe', 'pipe']
     });
+  const childTimeout = AbortSignal.timeout(9000);
+  const exited = once(child, 'exit', { signal: childTimeout });
+  const childClosed = once(child, 'close', { signal: childTimeout });
   let stdout = '';
   let stderr = '';
   child.stdout.on('data', (chunk) => { stdout += chunk; });
   child.stderr.on('data', (chunk) => { stderr += chunk; });
-  const exited = once(child, 'exit', { signal: AbortSignal.timeout(9000) });
 
   await waitForHealth(baseUrl, child);
   const adminHeaders = { 'X-Admin-Key': adminKey };
@@ -182,6 +184,7 @@ test('SIGTERM aborts held requests and exits cleanly before the force limit', as
   await closed;
   const [exitCode, exitSignal] = await exited;
   await heldRequest;
+  await childClosed;
 
   assert.equal(exitSignal, null);
   assert.equal(exitCode, 0);
