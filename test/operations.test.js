@@ -65,6 +65,21 @@ function assertPrefixedOutput(result) {
   assert.equal(result.stderr.length, 0);
 }
 
+function matchesDockerIgnore(pattern, candidate) {
+  let source = '^';
+  for (let index = 0; index < pattern.length; index += 1) {
+    if (pattern.startsWith('**/', index)) {
+      source += '(?:.*/)?';
+      index += 2;
+    } else if (pattern[index] === '*') {
+      source += '[^/]*';
+    } else {
+      source += /[\\^$.*+?()[\]{}|]/.test(pattern[index]) ? `\\${pattern[index]}` : pattern[index];
+    }
+  }
+  return new RegExp(`${source}$`).test(candidate);
+}
+
 test('doctor reports current database safety checks without exposing keys', (t) => {
   const temporaryDirectory = fs.mkdtempSync(path.join(os.tmpdir(), 'llmward-operations-'));
   const databasePath = path.join(temporaryDirectory, 'gateway.db');
@@ -260,14 +275,28 @@ test('Docker build context excludes secrets, runtime data, and local artifacts',
     .filter((entry) => entry && !entry.startsWith('#')));
   for (const entry of [
     'node_modules', '.git', 'data', '.env', '.env.*',
-    'coverage', '.nyc_output', '*.db', '*.db-wal', '*.db-shm', 'backups',
+    'coverage', '.nyc_output', '*.db', '*.sqlite', '*.sqlite3',
+    '*.db-wal', '*.db-shm', '*-wal', '*-shm', '*-journal', '*.bak', '*.backup', 'backups',
     '*.log', '*.out', '*.err', 'npm-debug.log*',
     '.agents', '.codex', '.superpowers', '.idea', '.vscode',
     '**/node_modules', '**/.git', '**/data', '**/.env', '**/.env.*',
-    '**/coverage', '**/.nyc_output', '**/*.db', '**/*.db-wal', '**/*.db-shm',
+    '**/coverage', '**/.nyc_output', '**/*.db', '**/*.sqlite', '**/*.sqlite3',
+    '**/*.db-wal', '**/*.db-shm', '**/*-wal', '**/*-shm', '**/*-journal', '**/*.bak', '**/*.backup',
     '**/backups', '**/*.log', '**/*.out', '**/*.err', '**/npm-debug.log*',
     '**/.agents', '**/.codex', '**/.superpowers', '**/.idea', '**/.vscode'
   ]) {
     assert.equal(ignored.has(entry), true, `.dockerignore must exclude ${entry}`);
+  }
+  for (const candidate of [
+    'gateway.sqlite', 'cache/gateway.sqlite',
+    'gateway.sqlite3', 'cache/live.sqlite3',
+    'gateway.db-journal', 'cache/gateway.db-journal',
+    'gateway.sqlite-wal', 'cache/live.sqlite3-wal',
+    'gateway.sqlite-shm', 'cache/live.sqlite3-shm',
+    'gateway.bak', 'archive/gateway.bak',
+    'gateway.backup', 'archive/gateway.backup'
+  ]) {
+    assert.equal([...ignored].some((pattern) => matchesDockerIgnore(pattern, candidate)), true,
+      `.dockerignore must exclude representative artifact ${candidate}`);
   }
 });

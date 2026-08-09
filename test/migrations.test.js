@@ -17,10 +17,11 @@ function databasePath(name) {
 }
 
 function migrate(file, options = {}) {
-  const { forbidVacuum = false, failPostIntegrityCheck = false } = options;
+  const { forbidVacuum = false, failPostIntegrityCheck = false, failPreflightCleanup = false, preflightControlPath } = options;
   const observers = [
     forbidVacuum && "const exec=Database.prototype.exec;Database.prototype.exec=function(sql){if(/\\bVACUUM\\b/i.test(sql))throw new Error('VACUUM invoked');return exec.call(this,sql)};",
-    failPostIntegrityCheck && "const pragma=Database.prototype.pragma;let integrityChecks=0;Database.prototype.pragma=function(sql,options){if(sql==='integrity_check'&&++integrityChecks===2)return [{integrity_check:'corrupt'}];return pragma.call(this,sql,options)};"
+    failPostIntegrityCheck && "const pragma=Database.prototype.pragma;let integrityChecks=0;Database.prototype.pragma=function(sql,options){if(sql==='integrity_check'&&++integrityChecks===2)return [{integrity_check:'corrupt'}];return pragma.call(this,sql,options)};",
+    failPreflightCleanup && "const fs=require('node:fs');const path=require('node:path');const rmSync=fs.rmSync;const mkdtempSync=fs.mkdtempSync;fs.mkdtempSync=function(prefix,options){const directory=mkdtempSync.call(this,prefix,options);if(path.basename(prefix).startsWith('llmward-schema-preflight-')){try{fs.writeFileSync(process.env.PREFLIGHT_CONTROL_PATH,directory,{flag:'wx',mode:0o600})}catch(error){rmSync.call(fs,directory,{recursive:true,force:true});throw error}}return directory};fs.rmSync=function(target,options){if(path.basename(target).startsWith('llmward-schema-preflight-'))throw new Error('private-cleanup-marker');return rmSync.call(this,target,options)};"
   ].filter(Boolean).join('');
   const script = observers
     ? `const Database=require('better-sqlite3');${observers}const {runMigrations}=require('./db/migrations');runMigrations();require('./db/database').close()`
@@ -28,7 +29,13 @@ function migrate(file, options = {}) {
   return spawnSync(process.execPath, ['-e', script], {
     cwd: root,
     encoding: 'utf8',
-    env: { ...process.env, DATABASE_PATH: file, ADMIN_SECRET_KEY: adminKey, LOG_LEVEL: 'silent' }
+    env: {
+      ...process.env,
+      DATABASE_PATH: file,
+      ADMIN_SECRET_KEY: adminKey,
+      LOG_LEVEL: 'silent',
+      ...(preflightControlPath ? { PREFLIGHT_CONTROL_PATH: preflightControlPath } : {})
+    }
   });
 }
 function open(file, options) {
@@ -54,6 +61,27 @@ function legacyUsers(database) {
 
 function assertMigrated(result) {
   assert.equal(result.status, 0, result.stdout + result.stderr);
+}
+
+function createDirtyFutureWal(file) {
+  const script = `
+    const Database = require('better-sqlite3');
+    const database = new Database(process.env.DATABASE_PATH);
+    if (database.pragma('journal_mode = WAL', { simple: true }) !== 'wal') process.exit(2);
+    database.pragma('wal_autocheckpoint = 0');
+    database.exec("CREATE TABLE sentinel (id INTEGER PRIMARY KEY, value TEXT NOT NULL); INSERT INTO sentinel VALUES (1, 'keep'); PRAGMA user_version = 2;");
+    if (database.pragma('wal_checkpoint(TRUNCATE)')[0].busy !== 0) process.exit(3);
+    database.exec("UPDATE sentinel SET value = 'future' WHERE id = 1; PRAGMA user_version = 3;");
+    if (database.pragma('user_version', { simple: true }) !== 3) process.exit(4);
+    process.exit(0);
+  `;
+  const result = spawnSync(process.execPath, ['-e', script], {
+    cwd: root, encoding: 'utf8', env: { ...process.env, DATABASE_PATH: file }
+  });
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+  assert.equal(fs.readFileSync(file).readUInt32BE(60) <= 2, true);
+  assert.equal(fs.statSync(`${file}-wal`).size > 0, true);
+  assert.equal(fs.existsSync(`${file}-shm`), true);
 }
 
 after(() => {
@@ -165,6 +193,85 @@ test('future schema is rejected without mutation', () => {
   assert.equal(crypto.createHash('sha256').update(bytesAfter).digest('hex'), hashBefore);
   assert.equal(fs.existsSync(`${file}-wal`), false);
   assert.equal(fs.existsSync(`${file}-shm`), false);
+});
+
+test('checkpointed WAL future schema is rejected without creating sidecars', () => {
+  const file = databasePath('future-clean-wal');
+  const database = open(file);
+  assert.equal(database.pragma('journal_mode = WAL', { simple: true }), 'wal');
+  database.exec("CREATE TABLE sentinel (id INTEGER PRIMARY KEY, value TEXT NOT NULL); INSERT INTO sentinel VALUES (1, 'keep'); PRAGMA user_version = 3;");
+  assert.equal(database.pragma('wal_checkpoint(TRUNCATE)')[0].busy, 0);
+  database.close();
+  const bytesBefore = fs.readFileSync(file);
+  const hashBefore = crypto.createHash('sha256').update(bytesBefore).digest('hex');
+  assert.deepEqual([...bytesBefore.subarray(18, 20)], [2, 2]);
+  assert.equal(bytesBefore.readUInt32BE(60), 3);
+  assert.equal(fs.existsSync(`${file}-wal`), false);
+  assert.equal(fs.existsSync(`${file}-shm`), false);
+
+  const result = migrate(file);
+
+  assert.notEqual(result.status, 0);
+  const bytesAfter = fs.readFileSync(file);
+  assert.equal(bytesAfter.equals(bytesBefore), true);
+  assert.equal(crypto.createHash('sha256').update(bytesAfter).digest('hex'), hashBefore);
+  assert.deepEqual([...bytesAfter.subarray(18, 20)], [2, 2]);
+  assert.equal(fs.existsSync(`${file}-wal`), false);
+  assert.equal(fs.existsSync(`${file}-shm`), false);
+});
+
+test('uncheckpointed WAL future schema is rejected without mutating database files', () => {
+  const file = databasePath('future-dirty-wal');
+  createDirtyFutureWal(file);
+  const targets = [file, `${file}-wal`, `${file}-shm`];
+  const before = targets.map((target) => fs.readFileSync(target));
+
+  const result = migrate(file);
+
+  assert.notEqual(result.status, 0);
+  assert.deepEqual(targets.map((target) => fs.existsSync(target)), [true, true, true]);
+  for (const [index, target] of targets.entries()) {
+    assert.equal(fs.readFileSync(target).equals(before[index]), true);
+  }
+});
+
+test('WAL schema preflight cleanup failure fails closed without private details', () => {
+  const file = databasePath('future-cleanup-failure');
+  const controlPath = `${file}.preflight-control`;
+  createDirtyFutureWal(file);
+  const targets = [file, `${file}-wal`, `${file}-shm`];
+  const before = targets.map((target) => fs.readFileSync(target));
+  let privateDirectory;
+  let ownsPrivateDirectory = false;
+
+  try {
+    const result = migrate(file, { failPreflightCleanup: true, preflightControlPath: controlPath });
+    if (fs.existsSync(controlPath)) privateDirectory = fs.readFileSync(controlPath, 'utf8');
+    ownsPrivateDirectory = typeof privateDirectory === 'string'
+      && path.dirname(path.resolve(privateDirectory)) === path.resolve(os.tmpdir())
+      && path.basename(privateDirectory).startsWith('llmward-schema-preflight-');
+
+    assert.notEqual(result.status, 0);
+    const output = `${result.stdout}${result.stderr}`;
+    assert.equal(output.includes('Database schema preflight failed'), true);
+    assert.equal(output.includes('private-cleanup-marker'), false);
+    assert.equal(ownsPrivateDirectory, true);
+    assert.equal(output.includes(privateDirectory), false);
+    assert.equal(fs.existsSync(path.join(privateDirectory, 'database.db')), true);
+    assert.equal(fs.existsSync(path.join(privateDirectory, 'database.db-wal')), true);
+    if (process.platform !== 'win32') {
+      assert.equal(fs.statSync(privateDirectory).mode & 0o777, 0o700);
+      assert.equal(fs.statSync(path.join(privateDirectory, 'database.db')).mode & 0o777, 0o600);
+      assert.equal(fs.statSync(path.join(privateDirectory, 'database.db-wal')).mode & 0o777, 0o600);
+    }
+    for (const [index, target] of targets.entries()) {
+      assert.equal(fs.readFileSync(target).equals(before[index]), true);
+    }
+  } finally {
+    if (ownsPrivateDirectory) fs.rmSync(privateDirectory, { recursive: true, force: true });
+    fs.rmSync(controlPath, { force: true });
+  }
+  assert.equal(privateDirectory === undefined || !fs.existsSync(privateDirectory), true);
 });
 
 test('foreign-key-invalid schema is rejected before mutation', () => {

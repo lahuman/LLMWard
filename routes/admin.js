@@ -29,6 +29,21 @@ const PROVIDER_CREATE_AUDIT_FIELDS = [
 ];
 const PROVIDER_UPDATE_AUDIT_FIELDS = [...PROVIDER_CREATE_AUDIT_FIELDS, 'is_active'];
 
+const FAILURE_AUDIT_FAMILIES = new Map([
+  ['users', { action: 'user.change', targetType: 'user', hasTargetId: true }],
+  ['models', { action: 'model.change', targetType: 'model', hasTargetId: true }],
+  ['providers', { action: 'provider.change', targetType: 'provider', hasTargetId: true }],
+  ['provider-presets', { action: 'provider-preset.change', targetType: 'provider-preset' }],
+  ['usage', { action: 'usage.change', targetType: 'usage' }],
+  ['onboarding', { action: 'onboarding.change', targetType: 'onboarding' }],
+  ['backup', { action: 'backup.change', targetType: 'backup' }],
+  ['backups', { action: 'backup.change', targetType: 'backup' }],
+  ['retention', { action: 'retention.change', targetType: 'retention' }],
+  ['audit-logs', { action: 'audit-log.change', targetType: 'audit-log' }],
+  ['stats', { action: 'stats.change', targetType: 'stats' }]
+]);
+const ADMIN_FAILURE_AUDIT = { action: 'admin.change', targetType: 'admin' };
+
 function auditChangedFields(body, supportedFields) {
   return supportedFields.filter((field) => Object.hasOwn(body, field));
 }
@@ -39,6 +54,16 @@ function auditTargetId(value) {
   if (!/^[1-9]\d*$/.test(canonical)) return null;
   const parsed = Number(canonical);
   return Number.isSafeInteger(parsed) ? parsed : null;
+}
+
+function failureAuditMetadata(requestPath) {
+  const segments = requestPath.split('/').filter(Boolean);
+  const family = FAILURE_AUDIT_FAMILIES.get((segments[0] || '').toLowerCase()) || ADMIN_FAILURE_AUDIT;
+  return {
+    action: family.action,
+    targetType: family.targetType,
+    targetId: family.hasTargetId ? auditTargetId(segments[1]) : null
+  };
 }
 
 function positive(value, name) {
@@ -283,11 +308,6 @@ function authType(value) {
 
 router.get('/', (req, res) => res.sendFile(path.join(__dirname, '..', 'public', 'admin-dashboard.html')));
 router.use(validateAdmin);
-router.use((req, res, next) => {
-  const segments = req.path.split('/').filter(Boolean);
-  res.locals.auditTargetId = auditTargetId(segments[1]);
-  next();
-});
 router.use((req, res, next) => {
   if (req.method !== 'POST' && req.method !== 'PUT') return next();
   if (req.body === undefined) req.body = {};
@@ -806,8 +826,8 @@ router.get('/stats', (req, res, next) => {
 router.use((error, req, res, next) => {
   if (req.method === 'POST' || req.method === 'PUT' || req.method === 'DELETE') {
     try {
-      const targetType = req.path.split('/').filter(Boolean)[0] || 'admin';
-      audit(`${targetType}.change`, targetType, res.locals.auditTargetId ?? null, false, []);
+      const target = failureAuditMetadata(req.path);
+      audit(target.action, target.targetType, target.targetId, false, []);
     } catch {}
   }
   next(error);

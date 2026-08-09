@@ -376,6 +376,53 @@ test('failed admin audits retain canonical target IDs', async () => {
   assert.deepEqual(JSON.parse(row.changed_fields), []);
 });
 
+test('unknown admin mutation failures use fixed audit metadata', async () => {
+  for (const method of ['POST', 'PUT']) {
+    const routeMarker = `private-${crypto.randomBytes(12).toString('hex')}`;
+    const bodyMarker = `private-${crypto.randomBytes(12).toString('hex')}`;
+    const previousId = db.prepare('SELECT COALESCE(MAX(id), 0) AS id FROM audit_logs').get().id;
+
+    const response = await admin(`/admin/${routeMarker}`, { method, body: [bodyMarker] });
+
+    assert.equal(response.status, 400);
+    const row = db.prepare(`
+      SELECT action, target_type, target_id, changed_fields FROM audit_logs
+      WHERE id > ? AND success = 0 ORDER BY id DESC LIMIT 1
+    `).get(previousId);
+    assert.ok(row);
+    const serialized = JSON.stringify(row);
+    assert.equal(serialized.includes(routeMarker), false);
+    assert.equal(serialized.includes(bodyMarker), false);
+    assert.deepEqual(row, {
+      action: 'admin.change', target_type: 'admin', target_id: null, changed_fields: '[]'
+    });
+  }
+});
+
+test('failed admin audits classify case-insensitive known families', async () => {
+  const user = await createUser('audit-case-user', ['standard']);
+  const marker = `private-${crypto.randomBytes(12).toString('hex')}`;
+  const previousId = db.prepare('SELECT COALESCE(MAX(id), 0) AS id FROM audit_logs').get().id;
+
+  const response = await admin(`/admin/USERS/${user.id}`, {
+    method: 'PUT', body: { [marker]: 'ignored' }
+  });
+
+  assert.equal(response.status, 400);
+  const row = db.prepare(`
+    SELECT action, target_type, target_id, changed_fields FROM audit_logs
+    WHERE id > ? AND success = 0 ORDER BY id DESC LIMIT 1
+  `).get(previousId);
+  assert.ok(row);
+  assert.equal(JSON.stringify(row).includes(marker), false);
+  assert.deepEqual(row, {
+    action: 'user.change',
+    target_type: 'user',
+    target_id: String(user.id),
+    changed_fields: '[]'
+  });
+});
+
 test('token rotation invalidates the old token immediately', async () => {
   const user = await createUser('rotation-user', ['standard']);
   const rotated = await admin(`/admin/users/${user.id}/rotate-token`, { method: 'POST' });
