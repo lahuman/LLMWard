@@ -1,3 +1,4 @@
+const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
 
@@ -14,6 +15,30 @@ function guardedCheck(name, action) {
   } catch {
     check(name, 'fail', 'unavailable');
   }
+}
+
+function probeWritableDirectory(directory) {
+  const probePath = path.join(
+    directory,
+    `.doctor-${process.pid}-${crypto.randomBytes(12).toString('hex')}`
+  );
+  let descriptor;
+  let owned = false;
+  let failed = false;
+  try {
+    descriptor = fs.openSync(probePath, 'wx', 0o600);
+    owned = true;
+  } catch {
+    failed = true;
+  } finally {
+    if (descriptor !== undefined) {
+      try { fs.closeSync(descriptor); } catch { failed = true; }
+    }
+    if (owned) {
+      try { fs.unlinkSync(probePath); } catch { failed = true; }
+    }
+  }
+  if (failed) throw new Error('data directory write probe failed');
 }
 
 function emit() {
@@ -94,7 +119,6 @@ if (db) {
         .get(new Date().toISOString()).count;
       return { status: count === 0 ? 'pass' : 'warn', detail: `count=${count}` };
     });
-    check('Request log retention', 'pass', `days=${config.requestLogRetentionDays}`);
   } catch {
     check('Database checks', 'fail', 'unavailable');
   }
@@ -103,18 +127,19 @@ if (db) {
 const dataDirectory = config.databasePath === ':memory:' ? null : path.dirname(config.databasePath);
 if (dataDirectory) {
   guardedCheck('Data directory readable', () => {
-    fs.accessSync(dataDirectory, fs.constants.R_OK);
+    fs.readdirSync(dataDirectory);
     return { status: 'pass', detail: 'readable=true' };
   });
   guardedCheck('Data directory writable', () => {
-    fs.accessSync(dataDirectory, fs.constants.W_OK);
+    probeWritableDirectory(dataDirectory);
     return { status: 'pass', detail: 'writable=true' };
   });
   if (typeof fs.statfsSync === 'function') {
     guardedCheck('Disk free space', () => {
       const disk = fs.statfsSync(dataDirectory);
-      const mebibytes = Math.floor((disk.bavail * disk.bsize) / 1048576);
-      const status = mebibytes === 0 ? 'fail' : mebibytes < 1024 ? 'warn' : 'pass';
+      const freeBytes = disk.bavail * disk.bsize;
+      const mebibytes = Math.round(freeBytes / 1048576);
+      const status = freeBytes <= 0 ? 'fail' : freeBytes < 1073741824 ? 'warn' : 'pass';
       return { status, detail: `mebibytes=${mebibytes}` };
     });
   }

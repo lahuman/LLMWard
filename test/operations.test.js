@@ -9,12 +9,14 @@ const Database = require('better-sqlite3');
 
 const repositoryRoot = path.join(__dirname, '..');
 const doctorPath = path.join(repositoryRoot, 'scripts', 'doctor.js');
+const environmentMarker = '8675309';
 
 function environment(overrides) {
   return {
     ...process.env,
     LOG_LEVEL: 'silent',
     CORS_ORIGIN: 'http://127.0.0.1',
+    REQUEST_LOG_RETENTION_DAYS: environmentMarker,
     ...overrides
   };
 }
@@ -29,22 +31,38 @@ function initializeDatabase(databasePath, adminKey) {
     encoding: 'utf8',
     env: environment({ DATABASE_PATH: databasePath, ADMIN_SECRET_KEY: adminKey })
   });
-  assert.equal(result.status, 0, result.stderr);
+  assert.equal(result.status, 0);
 }
 
-function runDoctor(databasePath, adminKey) {
-  return spawnSync(process.execPath, [doctorPath], {
+function runDoctor(databasePath, adminKey, options = {}) {
+  const args = options.preloadPath ? ['--require', options.preloadPath, doctorPath] : [doctorPath];
+  return spawnSync(process.execPath, args, {
     cwd: repositoryRoot,
     encoding: 'utf8',
-    env: environment({ DATABASE_PATH: databasePath, ADMIN_SECRET_KEY: adminKey })
+    env: environment({
+      DATABASE_PATH: databasePath,
+      ADMIN_SECRET_KEY: adminKey,
+      ...(options.environment || {})
+    })
   });
+}
+
+function writePreload(directory, name, source) {
+  const preloadPath = path.join(directory, name);
+  fs.writeFileSync(preloadPath, source, { mode: 0o600 });
+  return preloadPath;
+}
+
+function assertPrivate(result, markers) {
+  const output = `${result.stdout || ''}${result.stderr || ''}`;
+  for (const marker of [environmentMarker, ...markers]) assert.equal(output.includes(marker), false);
 }
 
 function assertPrefixedOutput(result) {
   const lines = result.stdout.trim().split(/\r?\n/).filter(Boolean);
   assert.notEqual(lines.length, 0);
-  for (const line of lines) assert.match(line, /^\[(PASS|WARN|FAIL)\] /);
-  assert.equal(result.stderr, '');
+  for (const line of lines) assert.equal(/^\[(PASS|WARN|FAIL)\] /.test(line), true);
+  assert.equal(result.stderr.length, 0);
 }
 
 test('doctor reports current database safety checks without exposing keys', (t) => {
@@ -52,6 +70,9 @@ test('doctor reports current database safety checks without exposing keys', (t) 
   const databasePath = path.join(temporaryDirectory, 'gateway.db');
   const adminKey = `admin-${crypto.randomBytes(32).toString('base64url')}`;
   const providerKey = `provider-${crypto.randomBytes(32).toString('base64url')}`;
+  const providerName = 'operations-provider-marker';
+  const providerDisplay = 'Operations provider display marker';
+  const providerBaseUrl = 'https://provider-marker.invalid/v1';
   t.after(() => fs.rmSync(temporaryDirectory, { recursive: true, force: true }));
 
   initializeDatabase(databasePath, adminKey);
@@ -59,7 +80,7 @@ test('doctor reports current database safety checks without exposing keys', (t) 
   const provider = db.prepare(`
     INSERT INTO providers (provider_name, display_name, base_url, auth_type, stored_api_key, is_active)
     VALUES (?, ?, ?, ?, ?, 1)
-  `).run('operations-provider', 'Operations provider', 'https://provider.invalid/v1', 'bearer', providerKey);
+  `).run(providerName, providerDisplay, providerBaseUrl, 'bearer', providerKey);
   db.prepare(`
     INSERT INTO models (model_name, display_name, model_type, provider_id, is_active)
     VALUES (?, ?, ?, ?, 1)
@@ -68,15 +89,16 @@ test('doctor reports current database safety checks without exposing keys', (t) 
 
   const result = runDoctor(databasePath, adminKey);
 
-  assert.equal(result.status, 0, result.stdout);
-  assert.equal(result.stdout.includes(adminKey), false);
-  assert.equal(result.stdout.includes(providerKey), false);
+  assertPrivate(result, [adminKey, providerKey, providerName, providerDisplay, providerBaseUrl]);
+  assert.equal(result.status, 0);
   for (const name of [
-    'Administrator key safety', 'Database connection', 'Database schema version',
+    'Node.js version', 'Configuration initialization', 'Administrator key safety',
+    'Database initialization', 'Database connection', 'Database schema version',
     'SQLite integrity', 'SQLite foreign keys', 'SQLite foreign key check',
-    'SQLite busy timeout', 'WAL mode', 'Data directory readable',
-    'Data directory writable'
-  ]) assert.ok(result.stdout.includes(name), `missing check: ${name}`);
+    'SQLite busy timeout', 'WAL mode', 'Active provider model',
+    'Expired quota reservations', 'Data directory readable',
+    'Data directory writable', 'Disk free space'
+  ]) assert.equal(result.stdout.includes(`[PASS] ${name}:`), true);
   assertPrefixedOutput(result);
 });
 
@@ -98,9 +120,10 @@ test('doctor warns without failing for missing active configuration and expired 
 
   const result = runDoctor(databasePath, adminKey);
 
-  assert.equal(result.status, 0, result.stdout);
-  assert.match(result.stdout, /^\[WARN\] Active provider model:/m);
-  assert.match(result.stdout, /^\[WARN\] Expired quota reservations:/m);
+  assertPrivate(result, [adminKey]);
+  assert.equal(result.status, 0);
+  assert.equal(/^\[WARN\] Active provider model:/m.test(result.stdout), true);
+  assert.equal(/^\[WARN\] Expired quota reservations:/m.test(result.stdout), true);
   assertPrefixedOutput(result);
 });
 
@@ -108,9 +131,85 @@ test('doctor prefixes initialization failures and does not print exception detai
   const marker = `unsafe-${crypto.randomBytes(12).toString('hex')}`;
   const result = runDoctor(path.join(os.tmpdir(), marker, 'gateway.db'), marker);
 
+  assertPrivate(result, [marker]);
   assert.equal(result.status, 1);
-  assert.equal(result.stdout.includes(marker), false);
-  assert.match(result.stdout, /^\[FAIL\] Configuration initialization: unavailable$/m);
+  assert.equal(/^\[FAIL\] Configuration initialization: unavailable$/m.test(result.stdout), true);
+  assertPrefixedOutput(result);
+});
+
+test('doctor fails when the data directory cannot be read', (t) => {
+  const temporaryDirectory = fs.mkdtempSync(path.join(os.tmpdir(), 'llmward-operations-read-'));
+  const databasePath = path.join(temporaryDirectory, 'gateway.db');
+  const adminKey = `admin-${crypto.randomBytes(32).toString('base64url')}`;
+  const failureMarker = `read-marker-${crypto.randomBytes(12).toString('hex')}`;
+  t.after(() => fs.rmSync(temporaryDirectory, { recursive: true, force: true }));
+  initializeDatabase(databasePath, adminKey);
+  const preloadPath = writePreload(temporaryDirectory, 'fail-read.cjs', `
+    const fs = require('node:fs');
+    fs.readdirSync = function () {
+      const error = new Error(process.env.DOCTOR_FAILURE_MARKER);
+      error.code = 'EACCES';
+      throw error;
+    };
+  `);
+
+  const result = runDoctor(databasePath, adminKey, {
+    preloadPath,
+    environment: { DOCTOR_FAILURE_MARKER: failureMarker }
+  });
+
+  assertPrivate(result, [adminKey, failureMarker]);
+  assert.equal(result.status, 1);
+  assert.equal(/^\[FAIL\] Data directory readable: unavailable$/m.test(result.stdout), true);
+  assertPrefixedOutput(result);
+});
+
+test('doctor fails when an exclusive data-directory write probe cannot open', (t) => {
+  const temporaryDirectory = fs.mkdtempSync(path.join(os.tmpdir(), 'llmward-operations-write-'));
+  const databasePath = path.join(temporaryDirectory, 'gateway.db');
+  const adminKey = `admin-${crypto.randomBytes(32).toString('base64url')}`;
+  const failureMarker = `write-marker-${crypto.randomBytes(12).toString('hex')}`;
+  t.after(() => fs.rmSync(temporaryDirectory, { recursive: true, force: true }));
+  initializeDatabase(databasePath, adminKey);
+  const preloadPath = writePreload(temporaryDirectory, 'fail-write.cjs', `
+    const fs = require('node:fs');
+    const openSync = fs.openSync;
+    fs.openSync = function (file, flags, mode) {
+      if (flags === 'wx' && mode === 0o600) {
+        const error = new Error(process.env.DOCTOR_FAILURE_MARKER);
+        error.code = 'EROFS';
+        throw error;
+      }
+      return openSync.call(this, file, flags, mode);
+    };
+  `);
+
+  const result = runDoctor(databasePath, adminKey, {
+    preloadPath,
+    environment: { DOCTOR_FAILURE_MARKER: failureMarker }
+  });
+
+  assertPrivate(result, [adminKey, failureMarker]);
+  assert.equal(result.status, 1);
+  assert.equal(/^\[FAIL\] Data directory writable: unavailable$/m.test(result.stdout), true);
+  assertPrefixedOutput(result);
+});
+
+test('doctor warns without failing for low nonzero disk space', (t) => {
+  const temporaryDirectory = fs.mkdtempSync(path.join(os.tmpdir(), 'llmward-operations-disk-'));
+  const databasePath = path.join(temporaryDirectory, 'gateway.db');
+  const adminKey = `admin-${crypto.randomBytes(32).toString('base64url')}`;
+  t.after(() => fs.rmSync(temporaryDirectory, { recursive: true, force: true }));
+  initializeDatabase(databasePath, adminKey);
+  const preloadPath = writePreload(temporaryDirectory, 'low-disk.cjs', `
+    require('node:fs').statfsSync = () => ({ bavail: 1, bsize: 524288 });
+  `);
+
+  const result = runDoctor(databasePath, adminKey, { preloadPath });
+
+  assertPrivate(result, [adminKey]);
+  assert.equal(result.status, 0);
+  assert.equal(/^\[WARN\] Disk free space:/m.test(result.stdout), true);
   assertPrefixedOutput(result);
 });
 
@@ -124,6 +223,14 @@ test('CI uses read-only contents permission, Node 22, install, test, and product
   for (const command of ['npm ci', 'npm test', 'npm audit --omit=dev']) {
     assert.match(workflow, new RegExp(`^\\s+- run: ${command.replace(/[.*+?^${}()|[\\]\\]/g, '\\$&')}\\s*$`, 'm'));
   }
+});
+
+test('package metadata requires Node 22', () => {
+  const packageJson = JSON.parse(fs.readFileSync(path.join(repositoryRoot, 'package.json'), 'utf8'));
+  const packageLock = JSON.parse(fs.readFileSync(path.join(repositoryRoot, 'package-lock.json'), 'utf8'));
+
+  assert.equal(packageJson.engines.node, '>=22');
+  assert.equal(packageLock.packages[''].engines.node, '>=22');
 });
 
 test('container artifacts use Node 22 and a single hardened gateway service', () => {
