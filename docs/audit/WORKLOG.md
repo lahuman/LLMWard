@@ -1,0 +1,184 @@
+# 감사 작업 로그
+
+## 체크포인트 1 — 기준선 및 실행 경로 조사
+
+- 현재 단계: P0/P1 코드 감사 진행 중
+- 완료한 조사:
+  - Git 상태, 브랜치, 시작 HEAD 및 최근 이력 확인
+  - Git 추적 비밀·DB·로그·백업 패턴 확인
+  - package scripts와 의존성 확인
+  - 서버 시작, Express middleware, config, DB 연결·migration, 인증, 제한, quota, proxy, streaming, 관리자 API, setup/doctor/backup/benchmark, Docker와 기존 문서 조사
+- 실행한 명령:
+  - `git status --short`, `git branch --show-current`, `git rev-parse HEAD`, `git log -5 --oneline`
+  - `git ls-files` 비밀·DB 패턴 검사
+  - `node --version`, `npm.cmd --version`, `npm.cmd install`
+  - `npm.cmd test`, `npm.cmd audit --omit=dev`, `npm.cmd run doctor`, `npm.cmd run benchmark`
+  - `docker version`, `docker compose version`
+- 성공:
+  - 작업 브랜치 `audit/codex-hardening-release` 생성
+  - 테스트 28/28 통과
+  - production dependency audit 취약점 0건
+  - doctor와 benchmark 성공
+- 실패/환경 제한:
+  - `npm.ps1`은 Windows 실행 정책으로 차단되어 `npm.cmd` 사용
+  - Docker CLI가 없어 Docker 실행 검증 불가
+- 변경한 파일:
+  - `docs/audit/BASELINE.md`
+  - `docs/audit/FINDINGS.md`
+  - `docs/audit/WORKLOG.md`
+- 추가한 테스트: 아직 없음
+- 다음 작업:
+  - 병렬 감사 결과 통합
+  - LLW-001~008 재현 테스트 우선 작성
+  - 작은 단위로 구현 수정과 관련 테스트 실행
+- 중지 조건 발생 여부: 없음. 운영 DB와 실제 공급자는 테스트에 사용하지 않는다.
+
+## 체크포인트 2 — 감사 하드닝 및 1.0.1 릴리즈 검증
+
+- 작업 기준:
+  - 시작 HEAD `93e9ad6`, Task 9 기준 HEAD `0f48c6581a6bdb6f303e5954a371f088e5f176ff`
+  - 브랜치 `audit/codex-hardening-release`
+  - package와 lockfile root version `1.0.1`, Node engine `>=22`, 생성된 Git tag 없음
+- 항목별 구현 커밋:
+  - Task 1 / LLW-003·004: `bc7d5de`, `00637d8`
+  - Task 2 / LLW-005: `0f45181`
+  - Task 3 / LLW-002: `451185a`, `2f7b377`
+  - Task 4 / LLW-001: `7cd465b`, `5a0dd1b`, `78b2011`
+  - Task 5 / LLW-006: `72c609c`, `8d5e988`, `3cef359`
+  - Task 6 / LLW-007: `7dd424a`, `dfa3a7c`
+  - Task 7 / setup 안전성: `a9125f8`, `be508a1`
+  - Task 8 / LLW-008: `c157059`, `0f48c65`
+- Task 9 변경 전 focused suite:
+  - `node --test test/migrations.test.js`: 9/9, exit 0, wall 1.936초, TAP 1.782초
+  - `node --test test/backup.test.js`: 14/14, exit 0, wall 3.773초, TAP 3.660초
+  - `node --test test/setup.test.js`: 2/2, exit 0, wall 0.606초, TAP 0.478초
+  - `node --test test/server.test.js`: 1/1, exit 0, wall 3.867초, TAP 3.765초
+  - `node --test test/operations.test.js`: 9/9, exit 0, wall 1.559초, TAP 1.419초
+  - `node --test test/gateway.test.js`: 35/35, exit 0, wall 5.790초, TAP 5.676초
+- 릴리즈 matrix:
+  - `npm.cmd test`: 70/70, exit 0, wall 9.108초, TAP 8.485초
+  - generated administrator key, 명시적 temp `DATABASE_PATH`, current schema, test-only active provider/model로 `npm.cmd run doctor`: 16 PASS, exit 0, command 718 ms
+  - temp DB와 loopback mock provider만 사용하는 `npm.cmd run benchmark`: exit 0, wall 2.385초
+    - startup 396.01 ms, idle RSS 45.84 MiB, DB 126,976 bytes
+    - direct provider 평균 1.50 ms, gateway 평균 6.23 ms, 추가 평균 4.73 ms
+    - 1/10/100 사용자 simulation은 각각 1/10/100 성공, streaming 200 및 `[DONE]`, concurrency 결과 `[200, 429]`
+  - `npm.cmd audit --omit=dev`: exit 0, wall 1.996초, production dependency 취약점 0건
+  - generated administrator key와 명시적 temp DB에서 `npm.cmd run backup`: exit 0, 663 ms; 반환된 temp artifact를 `npm.cmd run verify-backup -- <temp-path>`로 검증: exit 0, 562 ms, integrity `ok`, schema 2
+  - startup health `node --test test/server.test.js`: 1/1, exit 0, wall 3.941초, TAP 3.819초
+  - `git diff --check`: exit 0, 0.086초; `.gitignore` LF→CRLF 안내만 출력
+- 환경 제한:
+  - Docker CLI unavailable; runtime image/Compose verification not executed.
+  - CI와 container 정의는 `test/operations.test.js`에서 Node 22, read-only contents 권한, production audit, 단일 non-root Gateway service, hardening 설정을 정적으로 검사했다.
+- 안전 범위:
+  - doctor와 backup은 생성한 temp 디렉터리와 명시적 `DATABASE_PATH`만 사용하고 종료 후 삭제했다.
+  - benchmark는 자체 temp DB와 loopback mock provider만 사용했다.
+  - 운영 `data/gateway.db`, `.env`, 실제 자격증명, 실제 공급자에는 접근하지 않았다.
+
+## 체크포인트 3 — 최종 리뷰 안전 간극 수정
+
+- 작업 기준:
+  - 시작 HEAD `4dafd1392d7ad1f91afcf8860d62140b273ef77e`, 코드·테스트 커밋 `ef77d60b4ba42d0f78e438289ca0dcc32621f718`
+  - package와 lockfile root version `1.0.1`, dependency 변경과 생성된 HEAD tag 없음
+- 최종 리뷰 수정:
+  - 기존 DB를 readonly·`fileMustExist`로 preflight하고 writable open 뒤에도 schema를 재검사한 후에만 WAL을 적용한다. 모든 setup error에서 연결을 닫고 migration 내부 검사는 유지했다.
+  - backup temporary artifact를 `0o600`으로 생성해 hard-link publication 뒤에도 owner-only 권한을 유지한다.
+  - `.dockerignore`가 환경 변형, coverage, SQLite DB/WAL/SHM, backup, log/out/err/npm debug, scratch directory를 루트와 중첩 경로에서 제외한다.
+  - 관리자 감사 성공 field를 action별 고정 allowlist로 제한하고, 실패 field는 비우며 canonical positive safe integer target만 보존한다.
+- RED 증거:
+  - 미래 schema focused test: 1 failure, exit 1, wall 0.544초; 거부 뒤 journal mode가 `delete`가 아니라 `wal`
+  - backup permission focused test: 1 failure, exit 1, wall 0.780초; production `openSync` mode가 `0o600`이 아니라 `undefined`
+  - Docker context focused test: 1 failure, exit 1, wall 0.598초; `.env.*` 누락. 독립 리뷰 뒤 recursive 계약 test도 1 failure, exit 1, wall 0.279초
+  - audit privacy focused test: 2 failures, exit 1, wall 7.557초; 성공·실패의 unknown property name이 저장됨. 독립 리뷰 뒤 canonical failure target test도 1 failure, exit 1, wall 0.783초
+- GREEN 증거:
+  - 최초 focused: migration 1/1 (wall 0.477초), backup 1/1 (0.596초), Docker 1/1 (0.245초), audit 2/2 (0.777초)
+  - 전체 focused files: migrations 9/9 (wall 1.931초), backup 15/15 (4.374초), operations 10/10 (1.586초)
+  - 독립 리뷰 수정 뒤: recursive Docker 1/1 (wall 0.260초), audit privacy 3/3 (0.815초), operations 10/10 (1.489초), gateway 38/38 (5.761초)
+  - 최종 `npm.cmd test`: 75/75, exit 0, wall 8.679초, TAP 8.074초
+- 독립 리뷰:
+  - 최초 판정 0 Critical, 2 Important, 1 Minor. 재귀 Docker 패턴과 유효 실패 target 보존 두 Important를 수정했다.
+  - POSIX 최종 mode를 정확히 `0600`으로 비교하라는 Minor 제안은 더 엄격한 umask가 owner bit를 줄일 수 있어 적용하지 않았다. production mode 인자 `0o600`과 effective group/other bit 0을 각각 검증한다.
+  - 수정 후 재검토에서 남은 Critical/Important 없음, Ready 판정.
+- 불변조건과 제한:
+  - `docs/audit/BASELINE.md` SHA-256은 변경 전과 코드 커밋 후 모두 `C8E152CA33D4B5A00C54E6890AEC14344120776543DBEF4A8521BEE74D67E412`
+  - `git diff --check` 통과, 금지된 secret/DB/log/backup/coverage 추적 파일 없음
+  - Docker runtime 검증은 CLI 부재로 실행하지 않았고 `.dockerignore` 및 Dockerfile 계약을 정적으로 검증했다.
+  - 테스트는 temp directory·temp SQLite·loopback mock provider만 사용했다. 운영 DB, `.env`, 실제 자격증명과 공급자에는 접근하지 않았다.
+
+## 체크포인트 4 — 최종 리뷰 수정 Round 2
+
+- 작업 기준:
+  - 시작 HEAD `b1d1511b66c25d4004308286a2160f9f5a3607bd`, 코드·테스트 커밋 `ed0498f5f458863f05258dcf4664dbf474dbccf1`
+  - branch `audit/codex-hardening-release`, package/lockfile version `1.0.1`, dependency 변경과 생성된 HEAD tag 없음
+- 이전 체크포인트 정정 및 수정:
+  - 이전 readonly SQLite handle 설명을 O_RDONLY 100-byte file header 및 private main/WAL copy preflight로 교체했다. real target은 호환성 확인 전 SQLite로 열지 않으며 real SHM은 복사하지 않는다.
+  - private directory/main/WAL은 POSIX에서 각각 `0700`/`0600`으로 제한한다. close와 recursive cleanup은 `finally`에서 수행하며 cleanup 실패는 path/detail 없이 fail closed한다. host가 삭제를 거부하면 private copy가 운영자 제거 시점까지 남을 수 있다.
+  - `.dockerignore`에 root/recursive `.sqlite`, `.sqlite3`, generic `-wal`, `-shm`, `-journal`, `.bak`, `.backup` 계약과 대표 경로 match 회귀를 추가했다.
+  - 실패 audit family를 case-insensitive fixed allowlist와 `admin` fallback으로 제한했다. known user/model/provider family만 canonical positive safe integer ID를 보존한다.
+  - 이전 owner-only 표현을 POSIX backup `0o600` 범위로 정정했다. Windows는 data/backup/restore-staging의 보호 NTFS ACL을 Gateway 서비스 계정으로 제한하는 배포 책임이 남는다.
+- RED:
+  - checkpointed/dirty WAL 및 cleanup focused: 0/3, exit 1, TAP 888.4524 ms. clean fixture는 sidecar가 생겼고 interrupted dirty fixture는 SHM bytes가 바뀌었으며 cleanup failure는 generic preflight 오류가 아니었다.
+  - Docker context: 0/1, exit 1, TAP 147.0744 ms. 첫 누락은 root `*.sqlite`였다.
+  - unknown admin family: 0/1, exit 1, TAP 664.8087 ms. complete failure row에 dynamic route family가 남았다.
+  - case-insensitive known family: 0/1, exit 1, TAP 785.8551 ms. `/USERS/:id`가 `admin.change`와 null ID로 잘못 분류됐다.
+- GREEN:
+  - WAL focused 3/3, TAP 697.3172 ms; 실제 pre-delete cleanup failure test 1/1, TAP 355.7928 ms
+  - Docker focused 1/1, TAP 129.8395 ms
+  - unknown family focused 1/1, TAP 647.6555 ms; fallback+case family focused 2/2, TAP 697.0388 ms
+  - full migrations 12/12, TAP 2156.4893 ms; backup 15/15, TAP 4636.5222 ms; operations 10/10, TAP 1558.9475 ms; gateway 40/40, TAP 5857.1602 ms
+  - 최종 `npm.cmd test`: 80/80, exit 0, wall 10.901초, TAP 10224.0745 ms
+- 독립 review:
+  - cleanup fault test gap과 Express case-insensitive routing 분류 gap 두 Important를 수정했다.
+  - 최종 재검토: 0 Critical, 0 Important, 0 Minor, Ready.
+- 제한과 안전:
+  - Docker CLI가 없어 runtime image/Compose 검증은 실행하지 않았다. 대표 build-context 경로를 정적으로 검증했다.
+  - 모든 fixture는 temp directory, temp SQLite, loopback mock provider만 사용했다. `.env`, 운영 `data/gateway.db`, 실제 secret/provider/log/backup을 읽거나 출력하지 않았다.
+  - Windows ACL은 제품이 자동 변경하지 않는다. deployment가 Gateway 서비스 계정의 effective access를 확인해야 한다.
+
+## 체크포인트 5 — 최종 리뷰 수정 Round 3
+
+- 작업 기준:
+  - 시작 HEAD `8d35951008204ad95538332838a3e55c57c76832`, 코드·테스트 커밋 `907d379a4e8ae5ac1f4f6ad73ec735f8afa0af2c`
+  - branch `audit/codex-hardening-release`, package/lockfile version `1.0.1`, dependency 변경과 생성된 HEAD tag 없음
+- 리뷰 발견 및 수정:
+  - Windows에서 private main/WAL copy가 `os.tmpdir()` ACL을 상속하던 경로를 설정된 DB 부모의 고유한 `.llmward-schema-preflight-*` 직접 자식으로 옮겼다. POSIX `0700`/`0600`, main+WAL-only copy, target 불변성, 정확한 cleanup, 일반·path-free failure와 writable schema 재검사는 유지했다.
+  - 기존 0-byte regular DB는 `-wal`, `-shm`, `-journal`이 모두 없을 때만 신규 DB로 허용한다. sidecar와 main file type/size를 다시 확인하고, sidecar 존재·비정규 파일·stat 오류는 fail closed한다. nonempty corrupt/future-header 거부는 유지했다.
+- RED:
+  - protected-parent cleanup focused: 0/1, exit 1, TAP 361.9035 ms. private directory가 DB 부모의 직접 자식이 아니어서 실패했다.
+  - existing zero-byte focused: 0/1, exit 1, TAP 230.505 ms. `readDatabaseHeader()`의 100-byte header 검사에서 generic preflight failure로 거부됐다.
+  - zero-byte sidecar 표는 기존 구현에서도 1/1 fail-closed였으며, 신규 예외가 `-wal`/`-shm`/`-journal` 경계를 열지 않는 characterization guard로 유지했다.
+- GREEN:
+  - protected-parent cleanup 1/1, TAP 349.8444 ms; zero-byte startup 1/1, TAP 275.9347 ms; zero-byte sidecar 1/1, TAP 399.708 ms
+  - migrations 14/14, TAP 2662.1164 ms; backup 15/15, TAP 4310.7174 ms; setup 2/2, TAP 479.2891 ms; operations 10/10, TAP 1385.0072 ms; gateway 40/40, TAP 5603.2544 ms
+  - 최종 `npm.cmd test`: 82/82, exit 0, wall 10.047초, TAP 9435.1436 ms
+- 독립 review:
+  - 최종 판정 READY, 0 Critical, 0 Important, 1 non-blocking Minor. 구현은 direct-parent ACL inheritance, lstat fail-closed sidecar semantics, exact cleanup과 generic error 요구를 충족했다.
+  - nonregular/stat-error 및 검사 사이 mutation 경로를 직접 fault-injection하지 않은 Minor는 현재 correctness 결함이 아니다. 해당 동작은 구현되어 있고 추가 test hook 추상화가 현재 요구에 필요하지 않아 남겼다.
+  - reviewer의 fresh migrations 14/14와 scoped `git diff --check`도 통과했다.
+- 불변조건과 제한:
+  - `docs/audit/BASELINE.md` SHA-256은 `C8E152CA33D4B5A00C54E6890AEC14344120776543DBEF4A8521BEE74D67E412`; package SHA-256은 `6597E7762BB01DA9CA96BA71FE9BA8987C3EF64627B569FC7C2FCFF7060DEA01`; lockfile SHA-256은 `E76A5B15748E52BEB2E645F2CEBD7A2109031C52B56875D486F85A0520B1DDFA`
+  - `git diff --check` 통과, dependency와 `docs/audit/BASELINE.md` 변경 없음, scratch patch 없음
+  - Docker CLI가 없어 runtime image/Compose 검증은 실행하지 않았고 unsupported 통과 주장을 하지 않는다.
+  - 모든 test fixture는 temp directory와 temp SQLite만 사용했다. `.env`, 운영 `data/gateway.db`, 실제 secret/provider/log/backup을 읽거나 출력하지 않았다.
+
+## 체크포인트 6 — 최종 리뷰 수정 Round 4
+
+- 작업 기준:
+  - 시작 HEAD `2694db2fe962703b44407ddac0ee02e38133691d`, 코드·테스트 커밋 `f850e4919c426f212ae474b9bcf2af39187f757d`
+  - branch `audit/codex-hardening-release`, dependency와 `docs/audit/BASELINE.md` 변경 없음
+- 리뷰 발견 및 수정:
+  - main `DATABASE_PATH`가 없지만 orphaned `-wal`, `-shm`, `-journal` entry가 있으면 이전 startup은 새 main DB를 만들면서 sidecar를 삭제했다.
+  - missing/zero 신규 후보는 이제 sidecar 확인, main 재확인, 나타난 main의 기존 zero/nonempty/nonregular 검사, 여전히 missing이면 sidecar 즉시 재확인을 거친다. orphaned sidecar는 main이나 다른 sidecar를 만들거나 삭제하지 않고 generic/path/content-free 오류로 거부한다.
+- RED:
+  - orphaned-sidecar table 0/1, exit 1, TAP 273.6643 ms. 첫 `-wal` fixture에서 startup은 성공했고 새 main을 만들었으며 기존 sidecar를 삭제했다.
+- GREEN:
+  - orphaned-sidecar table 1/1, TAP 418.7393 ms
+  - sidecar-free missing 및 기존 zero-byte 경계 3/3, TAP 658.1445 ms
+  - migrations 15/15, TAP 2820.6636 ms; backup 15/15, TAP 4331.9254 ms; setup 2/2, TAP 584.7408 ms; operations 10/10, TAP 1348.886 ms; gateway 40/40, TAP 5916.8645 ms
+  - `npm.cmd test`: 83/83, exit 0, wall 9.320초, TAP 8673.4929 ms
+- 독립 review:
+  - 최종 판정 READY, 0 Critical, 0 Important, 1 non-blocking Minor. 구현과 실제 process test는 correct, fail-closed, privacy-preserving, minimal 판정을 받았다.
+  - re-lstat/final sidecar recheck 사이 race transition을 deterministic fs hook으로 mutation-cover하지 않은 Minor는 현재 correctness 결함이 아니다. 추가 hook abstraction은 현재 요구에 필요하지 않아 남겼다.
+- 불변조건과 제한:
+  - baseline/package/lock SHA-256은 체크포인트 5와 동일하고 `git diff --check`가 통과했다.
+  - Docker CLI가 없어 runtime Docker 검증은 실행하지 않았고 unsupported 통과 주장을 하지 않는다.
+  - 모든 fixture는 temp directory와 temp SQLite만 사용했다. `.env`, 운영 `data/gateway.db`, 실제 secret/provider/log/backup을 읽거나 출력하지 않았다.

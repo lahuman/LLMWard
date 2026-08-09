@@ -15,7 +15,6 @@ npm-debug.log*
 
 /.agents/
 /.codex/
-/AGENTS.md
 /.idea/
 /.vscode/
 .DS_Store

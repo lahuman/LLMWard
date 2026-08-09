@@ -20,8 +20,32 @@ if (!fs.existsSync(envPath)) {
     /^ADMIN_SECRET_KEY=.*$/m,
     `ADMIN_SECRET_KEY=${generatedKey}`
   );
-  fs.writeFileSync(envPath, contents, { encoding: 'utf8', flag: 'wx', mode: 0o600 });
-  created = true;
+  const temporaryPath = path.join(root, `.env.${process.pid}.${crypto.randomBytes(6).toString('hex')}.tmp`);
+  let ownsTemporaryPath = false;
+  try {
+    const temporaryFile = fs.openSync(temporaryPath, 'wx', 0o600);
+    ownsTemporaryPath = true;
+    try {
+      fs.writeFileSync(temporaryFile, contents, 'utf8');
+    } finally {
+      fs.closeSync(temporaryFile);
+    }
+    try {
+      fs.linkSync(temporaryPath, envPath);
+      created = true;
+    } catch (error) {
+      if (error.code !== 'EEXIST') throw error;
+      generatedKey = undefined;
+    }
+  } finally {
+    if (ownsTemporaryPath) {
+      try {
+        fs.unlinkSync(temporaryPath);
+      } catch (error) {
+        if (error.code !== 'ENOENT') throw error;
+      }
+    }
+  }
 }
 
 fs.accessSync(dataDirectory, fs.constants.R_OK | fs.constants.W_OK);
@@ -30,8 +54,17 @@ const values = dotenv.parse(fs.readFileSync(envPath));
 for (const name of ['ADMIN_SECRET_KEY']) {
   if (!values[name]) throw new Error(`${name} is required in .env`);
 }
-const { validateAdminKey } = require('../config');
-validateAdminKey(values.ADMIN_SECRET_KEY);
+if (typeof values.ADMIN_SECRET_KEY !== 'string' || values.ADMIN_SECRET_KEY.length < 32) {
+  throw new Error('ADMIN_SECRET_KEY must contain at least 32 characters');
+}
+const normalizedAdminKey = values.ADMIN_SECRET_KEY.toLowerCase();
+const placeholders = [
+  'change_me', 'changeme', 'example', 'placeholder', 'replace_me', 'your_admin',
+  'generate-a-unique', 'admin_secret_key', 'password'
+];
+if (placeholders.some((placeholder) => normalizedAdminKey.includes(placeholder)) || new Set(values.ADMIN_SECRET_KEY).size < 8) {
+  throw new Error('ADMIN_SECRET_KEY must not be weak or an example placeholder');
+}
 
 if (created) {
   process.stdout.write('Setup complete. Save this administrator key now; it will not be shown again.\n');

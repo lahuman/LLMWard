@@ -2,6 +2,7 @@ const { test, before, after } = require('node:test');
 const assert = require('node:assert/strict');
 const crypto = require('node:crypto');
 const fs = require('node:fs');
+const { EventEmitter, once } = require('node:events');
 const http = require('node:http');
 const os = require('node:os');
 const path = require('node:path');
@@ -29,6 +30,8 @@ let inactiveProviderId;
 const providerCalls = new Map();
 const receivedMaximums = new Map();
 const receivedPayloads = new Map();
+const providerPaths = [];
+const providerEvents = new EventEmitter();
 let upstreamDisconnects = 0;
 
 function listen(server) {
@@ -37,6 +40,14 @@ function listen(server) {
 
 function close(server) {
   return new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+}
+
+async function waitFor(predicate, message) {
+  const deadline = Date.now() + 3000;
+  while (!predicate()) {
+    if (Date.now() >= deadline) throw new Error(message);
+    await new Promise((resolve) => setImmediate(resolve));
+  }
 }
 
 async function request(route, options = {}) {
@@ -79,17 +90,38 @@ function chat(token, model, maxTokens) {
   });
 }
 
+function unsafeProviderBaseUrls() {
+  return [
+    `${providerBaseUrl}?mode=unsafe`,
+    `${providerBaseUrl}#fragment`,
+    `${providerBaseUrl}?`,
+    `${providerBaseUrl}#`,
+    `${providerBaseUrl}/../escape`,
+    `${providerBaseUrl}/%2e%2e/escape`,
+    `${providerBaseUrl}/openai\\v1`,
+    `${providerBaseUrl}/a/%2e%2e\\escape`,
+    `${providerBaseUrl}/a/.%2e/escape`,
+    `${providerBaseUrl}/a/%2e./escape`,
+    `${providerBaseUrl}/openai%2fv1`,
+    `${providerBaseUrl}/openai%5cv1`,
+    `${providerBaseUrl}/openai/%252e/v1`,
+    `${providerBaseUrl}/openai%252fv1`,
+    `${providerBaseUrl}/openai%255cv1`
+  ];
+}
+
 before(async () => {
   providerServer = http.createServer(async (req, res) => {
+    providerPaths.push(req.url);
     if (req.url === '/redirect/models' || req.url === '/redirect/chat/completions') {
       res.writeHead(302, { Location: req.url.endsWith('/models') ? '/models' : '/chat/completions' });
       return res.end();
     }
-    if (req.url === '/models') {
+    if (req.url === '/models' || req.url === '/openai/v1/models') {
       res.writeHead(200, { 'Content-Type': 'application/json' });
       return res.end(JSON.stringify({ data: [{ id: 'discovered-model' }, { id: 'standard' }] }));
     }
-    if (req.url !== '/chat/completions' || req.method !== 'POST') {
+    if ((req.url !== '/chat/completions' && req.url !== '/openai/v1/chat/completions') || req.method !== 'POST') {
       res.writeHead(404); return res.end();
     }
     let raw = '';
@@ -103,6 +135,37 @@ before(async () => {
     if (payload.model === 'provider-fail') {
       res.writeHead(503, { 'Content-Type': 'application/json' });
       return res.end(JSON.stringify({ secret: 'provider-response-must-not-be-stored' }));
+    }
+    if (payload.model === 'backpressure') {
+      res.once('close', () => {
+        if (!res.writableEnded) upstreamDisconnects += 1;
+        providerEvents.emit('backpressure:closed');
+      });
+      res.writeHead(200, { 'Content-Type': 'text/event-stream' });
+      providerEvents.emit('backpressure:started');
+      const chunk = `data: ${JSON.stringify({ choices: [{ delta: { content: 'x'.repeat(64 * 1024) } }] })}\n\n`;
+      while (!res.destroyed && !res.writableEnded) {
+        if (!res.write(chunk)) {
+          await new Promise((resolve) => {
+            const done = () => {
+              res.off('drain', done);
+              res.off('close', done);
+              resolve();
+            };
+            res.once('drain', done);
+            res.once('close', done);
+          });
+        }
+      }
+      return;
+    }
+    if (payload.model === 'abort-in-flight') {
+      res.once('close', () => {
+        if (!res.writableEnded) upstreamDisconnects += 1;
+        providerEvents.emit('abort-in-flight:closed');
+      });
+      providerEvents.emit('abort-in-flight:started');
+      return;
     }
     if (payload.model === 'concurrent' || payload.model.includes('concurrency') || payload.model === 'disconnect') {
       if (payload.model === 'disconnect') {
@@ -142,7 +205,7 @@ before(async () => {
   });
   assert.equal(provider.status, 201);
   providerId = provider.body.id;
-  for (const [name, maxTokens] of [['standard', 8], ['input-limit', 4], ['output-limit', 2], ['concurrent', 4], ['atomic-fail', 2], ['unpriced', 4], ['inactive-model', 4], ['streaming', 4], ['user-concurrency', 4], ['model-concurrency', 4], ['disconnect', 4], ['privacy', 4]]) {
+  for (const [name, maxTokens] of [['standard', 8], ['input-limit', 4], ['output-limit', 2], ['concurrent', 4], ['atomic-fail', 2], ['unpriced', 4], ['inactive-model', 4], ['streaming', 4], ['backpressure', 4], ['abort-in-flight', 4], ['user-concurrency', 4], ['model-concurrency', 4], ['disconnect', 4], ['privacy', 4]]) {
     const model = await admin('/admin/models', {
       method: 'POST', body: { model_name: name, display_name: name, provider_id: providerId, max_tokens: maxTokens }
     });
@@ -180,6 +243,47 @@ after(async () => {
   fs.rmSync(temporaryDirectory, { recursive: true, force: true });
 });
 
+test('security headers and no-store protect browser and admin responses', async () => {
+  const health = await request('/health');
+  const dashboard = await request('/admin/');
+  const uppercaseDashboard = await request('/ADMIN/');
+  const directDashboard = await request('/admin-dashboard.html');
+  const queriedDirectDashboard = await request('/admin-dashboard.html?x=1');
+  const users = await admin('/admin/users');
+  const uppercaseUsers = await admin('/ADMIN/users');
+  const queriedUsers = await admin('/admin/users?x=1');
+  const stylesheet = await request('/admin-dashboard.css');
+  const script = await request('/admin-dashboard.js');
+  const responses = [health, dashboard, uppercaseDashboard, directDashboard, queriedDirectDashboard, users, uppercaseUsers, queriedUsers, stylesheet, script];
+  for (const response of responses) {
+    assert.equal(response.headers.get('x-frame-options'), 'DENY');
+    assert.equal(response.headers.get('x-content-type-options'), 'nosniff');
+    assert.equal(response.headers.get('referrer-policy'), 'no-referrer');
+    assert.equal(response.headers.get('content-security-policy'), [
+      "default-src 'self'",
+      "script-src 'self'",
+      "style-src 'self'",
+      "img-src 'self' data:",
+      "connect-src 'self'",
+      "object-src 'none'",
+      "base-uri 'none'",
+      "frame-ancestors 'none'",
+      "form-action 'self'"
+    ].join('; '));
+  }
+  for (const response of [dashboard, uppercaseDashboard, directDashboard, queriedDirectDashboard, users, uppercaseUsers, queriedUsers]) {
+    assert.equal(response.status, 200);
+    assert.equal(response.headers.get('cache-control'), 'no-store');
+  }
+  for (const response of [dashboard, uppercaseDashboard, directDashboard, queriedDirectDashboard]) {
+    assert.match(response.headers.get('content-type') || '', /^text\/html\b/);
+  }
+  assert.equal(stylesheet.status, 200);
+  assert.match(stylesheet.headers.get('content-type') || '', /^text\/css\b/);
+  assert.equal(script.status, 200);
+  assert.match(script.headers.get('content-type') || '', /^(?:application|text)\/javascript\b/);
+});
+
 test('health check and admin authentication', async () => {
   assert.equal((await request('/health')).status, 200);
   assert.equal((await request('/v1/models')).status, 401);
@@ -210,6 +314,113 @@ test('user creation authenticates and user lists never disclose tokens', async (
   assert.equal(users.status, 200);
   assert.equal(JSON.stringify(users.body).includes(user.token), false);
   assert.equal(Object.hasOwn(users.body[0], 'api_token'), false);
+});
+
+test('successful admin audits keep only fixed supported field names', async () => {
+  const user = await createUser('audit-success-user', ['standard']);
+  const marker = `prompt_${crypto.randomBytes(12).toString('hex')}`;
+  const response = await admin(`/admin/users/${user.id}`, {
+    method: 'PUT',
+    body: { max_daily_input_tokens: 321, [marker]: 'ignored' }
+  });
+  assert.equal(response.status, 200);
+
+  const row = db.prepare(`
+    SELECT target_id, changed_fields FROM audit_logs
+    WHERE action = 'user.update' AND target_id = ? ORDER BY id DESC LIMIT 1
+  `).get(String(user.id));
+  const fields = JSON.parse(row.changed_fields);
+  assert.equal(fields.includes(marker), false);
+  assert.equal(fields.length, 1);
+  assert.equal(fields[0], 'max_daily_input_tokens');
+  assert.equal(row.target_id, String(user.id));
+});
+
+test('failed admin audits discard request field names and malformed target IDs', async () => {
+  const fieldMarker = `secret_${crypto.randomBytes(12).toString('hex')}`;
+  const routeMarker = `invalid-${crypto.randomBytes(12).toString('hex')}`;
+  const previousId = db.prepare('SELECT COALESCE(MAX(id), 0) AS id FROM audit_logs').get().id;
+  const response = await admin(`/admin/users/${routeMarker}`, {
+    method: 'PUT', body: { [fieldMarker]: 'ignored' }
+  });
+  assert.equal(response.status, 400);
+
+  const row = db.prepare(`
+    SELECT target_id, changed_fields FROM audit_logs
+    WHERE id > ? AND success = 0 ORDER BY id DESC LIMIT 1
+  `).get(previousId);
+  assert.ok(row);
+  const serialized = JSON.stringify(row);
+  assert.equal(serialized.includes(fieldMarker), false);
+  assert.equal(serialized.includes(routeMarker), false);
+  assert.equal(row.target_id, null);
+  assert.deepEqual(JSON.parse(row.changed_fields), []);
+});
+
+test('failed admin audits retain canonical target IDs', async () => {
+  const user = await createUser('audit-failure-user', ['standard']);
+  const marker = `secret_${crypto.randomBytes(12).toString('hex')}`;
+  const previousId = db.prepare('SELECT COALESCE(MAX(id), 0) AS id FROM audit_logs').get().id;
+  const response = await admin(`/admin/users/${user.id}`, {
+    method: 'PUT', body: { [marker]: 'ignored' }
+  });
+  assert.equal(response.status, 400);
+
+  const row = db.prepare(`
+    SELECT target_id, changed_fields FROM audit_logs
+    WHERE id > ? AND success = 0 ORDER BY id DESC LIMIT 1
+  `).get(previousId);
+  assert.ok(row);
+  assert.equal(row.changed_fields.includes(marker), false);
+  assert.equal(row.target_id, String(user.id));
+  assert.deepEqual(JSON.parse(row.changed_fields), []);
+});
+
+test('unknown admin mutation failures use fixed audit metadata', async () => {
+  for (const method of ['POST', 'PUT']) {
+    const routeMarker = `private-${crypto.randomBytes(12).toString('hex')}`;
+    const bodyMarker = `private-${crypto.randomBytes(12).toString('hex')}`;
+    const previousId = db.prepare('SELECT COALESCE(MAX(id), 0) AS id FROM audit_logs').get().id;
+
+    const response = await admin(`/admin/${routeMarker}`, { method, body: [bodyMarker] });
+
+    assert.equal(response.status, 400);
+    const row = db.prepare(`
+      SELECT action, target_type, target_id, changed_fields FROM audit_logs
+      WHERE id > ? AND success = 0 ORDER BY id DESC LIMIT 1
+    `).get(previousId);
+    assert.ok(row);
+    const serialized = JSON.stringify(row);
+    assert.equal(serialized.includes(routeMarker), false);
+    assert.equal(serialized.includes(bodyMarker), false);
+    assert.deepEqual(row, {
+      action: 'admin.change', target_type: 'admin', target_id: null, changed_fields: '[]'
+    });
+  }
+});
+
+test('failed admin audits classify case-insensitive known families', async () => {
+  const user = await createUser('audit-case-user', ['standard']);
+  const marker = `private-${crypto.randomBytes(12).toString('hex')}`;
+  const previousId = db.prepare('SELECT COALESCE(MAX(id), 0) AS id FROM audit_logs').get().id;
+
+  const response = await admin(`/admin/USERS/${user.id}`, {
+    method: 'PUT', body: { [marker]: 'ignored' }
+  });
+
+  assert.equal(response.status, 400);
+  const row = db.prepare(`
+    SELECT action, target_type, target_id, changed_fields FROM audit_logs
+    WHERE id > ? AND success = 0 ORDER BY id DESC LIMIT 1
+  `).get(previousId);
+  assert.ok(row);
+  assert.equal(JSON.stringify(row).includes(marker), false);
+  assert.deepEqual(row, {
+    action: 'user.change',
+    target_type: 'user',
+    target_id: String(user.id),
+    changed_fields: '[]'
+  });
 });
 
 test('token rotation invalidates the old token immediately', async () => {
@@ -292,6 +503,27 @@ test('concurrent requests cannot oversubscribe output quota', async () => {
   assert.equal(usage.body.outputTokens, 5);
   assert.equal(usage.body.remainingOutput, 0);
   assert.equal((await chat(user.token, 'concurrent', 1)).status, 429);
+});
+
+test('recordUsage applies tokens to the reservation UTC date', async () => {
+  const user = await createUser('reservation-date-user', ['standard']);
+  const model = db.prepare("SELECT * FROM models WHERE model_name = 'standard'").get();
+  const { reserveQuota, recordUsage } = require('../services/usage');
+  const reservation = reserveQuota(
+    db.prepare('SELECT * FROM users WHERE id = ?').get(user.id),
+    2,
+    model.max_tokens
+  );
+  const reservedDate = '2001-02-03';
+  db.prepare('UPDATE quota_reservations SET request_date = ? WHERE request_id = ?')
+    .run(reservedDate, reservation.requestId);
+  recordUsage(reservation.requestId, user.id, model, 2, 1, 5);
+  const fixed = db.prepare('SELECT * FROM usage_logs WHERE user_id = ? AND request_date = ?')
+    .get(user.id, reservedDate);
+  assert.equal(fixed.input_tokens, 2);
+  assert.equal(fixed.output_tokens, 1);
+  assert.equal(db.prepare('SELECT COUNT(*) AS count FROM quota_reservations WHERE request_id = ?')
+    .get(reservation.requestId).count, 0);
 });
 
 test('usage summary and request log are atomic', async () => {
@@ -410,15 +642,100 @@ test('admin input validation rejects unsafe values and references', async () => 
   for (const result of results) assert.equal(result.body.error.includes('SQLITE'), false);
 });
 
-test('dashboard is UTF-8-safe JavaScript without unsafe rendering or persistent keys', () => {
+test('provider Base URLs reject query fragment traversal and encoded separators', async () => {
+  const unsafeUrls = unsafeProviderBaseUrls();
+  for (const [index, base_url] of unsafeUrls.entries()) {
+    const response = await admin('/admin/providers', {
+      method: 'POST',
+      body: { provider_name: `unsafe-${index}`, display_name: 'Unsafe', base_url, auth_type: 'none' }
+    });
+    assert.equal(response.status, 400);
+    assert.equal(response.body.code, 'invalid_request');
+  }
+});
+
+test('provider Base URL updates reject unsafe forms without changing the stored canonical URL', async () => {
+  const provider = await admin('/admin/providers', {
+    method: 'POST',
+    body: {
+      provider_name: 'base-path-update-provider',
+      display_name: 'Base Path Update',
+      base_url: `HTTP://127.0.0.1:${providerServer.address().port}/openai/v1/`,
+      auth_type: 'none'
+    }
+  });
+  assert.equal(provider.status, 201);
+  const canonicalUrl = `${providerBaseUrl}/openai/v1`;
+  assert.equal(provider.body.base_url, canonicalUrl);
+
+  for (const base_url of unsafeProviderBaseUrls()) {
+    const response = await admin(`/admin/providers/${provider.body.id}`, {
+      method: 'PUT', body: { base_url }
+    });
+    assert.equal(response.status, 400);
+    assert.equal(response.body.code, 'invalid_request');
+    const stored = (await admin('/admin/providers')).body.find((item) => item.id === provider.body.id);
+    assert.equal(stored.base_url, canonicalUrl);
+  }
+});
+
+test('provider Base URLs are canonical and fixed endpoints preserve the base path', async () => {
+  const provider = await admin('/admin/providers', {
+    method: 'POST',
+    body: {
+      provider_name: 'base-path-provider',
+      display_name: 'Base Path',
+      base_url: `HTTP://127.0.0.1:${providerServer.address().port}/openai/v1/`,
+      auth_type: 'none'
+    }
+  });
+  assert.equal(provider.status, 201);
+  assert.equal(provider.body.base_url, `${providerBaseUrl}/openai/v1`);
+  const encodedPathProvider = await admin('/admin/providers', {
+    method: 'POST',
+    body: {
+      provider_name: 'encoded-path-provider',
+      display_name: 'Encoded Path',
+      base_url: `${providerBaseUrl}/openai%20gateway/v1/`,
+      auth_type: 'none'
+    }
+  });
+  assert.equal(encodedPathProvider.status, 201);
+  assert.equal(encodedPathProvider.body.base_url, `${providerBaseUrl}/openai%20gateway/v1`);
+
+  const pathStart = providerPaths.length;
+  assert.equal((await admin(`/admin/providers/${provider.body.id}/discover-models`)).status, 200);
+  assert.equal((await admin('/admin/models', {
+    method: 'POST',
+    body: { model_name: 'base-path-model', display_name: 'Base Path', provider_id: provider.body.id }
+  })).status, 201);
+  const user = await createUser('base-path-user', ['base-path-model']);
+  assert.equal((await chat(user.token, 'base-path-model', 1)).status, 200);
+  assert.deepEqual(providerPaths.slice(pathStart), [
+    '/openai/v1/models',
+    '/openai/v1/chat/completions'
+  ]);
+});
+
+test('dashboard uses CSP-compatible external assets and safe DOM rendering', () => {
   const html = fs.readFileSync(path.join(__dirname, '..', 'public', 'admin-dashboard.html'), 'utf8');
-  const script = html.match(/<script>([\s\S]*?)<\/script>/);
-  assert.ok(script);
-  assert.doesNotThrow(() => new vm.Script(script[1]));
-  assert.equal(/\binnerHTML\b/.test(script[1]), false);
-  assert.equal(/\blocalStorage\b/.test(script[1]), false);
-  assert.equal(/\son\w+=/.test(html), false);
+  const script = fs.readFileSync(path.join(__dirname, '..', 'public', 'admin-dashboard.js'), 'utf8');
+  assert.match(html, /<link rel="stylesheet" href="\/admin-dashboard\.css">/);
+  assert.match(html, /<script src="\/admin-dashboard\.js"><\/script>/);
+  assert.equal(/<style(?:\s|>)/i.test(html), false);
+  assert.equal(/<script(?![^>]*\bsrc=)[^>]*>[\s\S]*?<\/script>/i.test(html), false);
+  assert.equal(/\son\w+\s*=/.test(html), false);
   assert.equal(html.includes('\uFFFD'), false);
+  assert.equal(script.includes('\uFFFD'), false);
+  assert.doesNotThrow(() => new vm.Script(script));
+  for (const sink of [
+    /\binnerHTML\b/, /\bouterHTML\b/, /insertAdjacentHTML/,
+    /document\.write/, /\blocalStorage\b/
+  ]) {
+    assert.equal(sink.test(script), false);
+  }
+  assert.ok(/\btextContent\b/.test(script));
+  assert.ok(/createTextNode/.test(script));
 });
 
 test('database integrity remains valid', () => {
@@ -644,6 +961,74 @@ test('client disconnect aborts upstream and releases quota and concurrency', asy
   assert.equal(db.prepare('SELECT COUNT(*) AS count FROM quota_reservations WHERE user_id = ?').get(user.id).count, 0);
   const { state } = require('../services/limits');
   assert.equal(state().users[user.id], undefined);
+});
+
+test('streaming backpressure aborts upstream and releases quota and concurrency', async () => {
+  const user = await createUser('backpressure-user', ['backpressure']);
+  const before = upstreamDisconnects;
+  const started = once(providerEvents, 'backpressure:started', { signal: AbortSignal.timeout(3000) });
+  const closed = once(providerEvents, 'backpressure:closed', { signal: AbortSignal.timeout(3000) });
+  const client = http.request(`${baseUrl}/v1/chat/completions`, {
+    method: 'POST', headers: { Authorization: `Bearer ${user.token}`, 'Content-Type': 'application/json' }
+  });
+  client.on('error', () => {});
+  client.on('response', (response) => {
+    response.once('error', () => {});
+    client.destroy();
+  });
+  client.end(JSON.stringify({
+    model: 'backpressure', stream: true,
+    messages: [{ role: 'user', content: 'backpressure-secret' }], max_tokens: 1
+  }));
+
+  await started;
+  await closed;
+  const reservationCount = () => db.prepare(
+    'SELECT COUNT(*) AS count FROM quota_reservations WHERE user_id = ?'
+  ).get(user.id).count;
+  await waitFor(() => reservationCount() === 0, 'backpressure cleanup did not finish');
+  const { state } = require('../services/limits');
+  assert.equal(upstreamDisconnects, before + 1);
+  assert.equal(reservationCount(), 0);
+  assert.equal(state().users[user.id], undefined);
+  assert.equal(state().models.backpressure, undefined);
+  assert.equal(state().providers[providerId], undefined);
+});
+
+test('abortInFlight aborts active requests and cleanup is idempotent', async (t) => {
+  const user = await createUser('abort-in-flight-user', ['abort-in-flight']);
+  const before = upstreamDisconnects;
+  const started = once(providerEvents, 'abort-in-flight:started', { signal: AbortSignal.timeout(3000) });
+  const closed = once(providerEvents, 'abort-in-flight:closed', { signal: AbortSignal.timeout(3000) });
+  let client;
+  client = http.request(`${baseUrl}/v1/chat/completions`, {
+    method: 'POST', headers: { Authorization: `Bearer ${user.token}`, 'Content-Type': 'application/json' }
+  }, (response) => {
+    response.resume();
+  });
+  const completed = once(client, 'close', { signal: AbortSignal.timeout(3000) });
+  client.end(JSON.stringify({
+    model: 'abort-in-flight', messages: [{ role: 'user', content: 'abort-secret' }], max_tokens: 1
+  }));
+  t.after(() => client.destroy());
+
+  await started;
+  const v1 = require('../routes/v1');
+  assert.equal(typeof v1.abortInFlight, 'function');
+  v1.abortInFlight();
+  v1.abortInFlight();
+  await closed;
+  await completed;
+  const reservationCount = () => db.prepare(
+    'SELECT COUNT(*) AS count FROM quota_reservations WHERE user_id = ?'
+  ).get(user.id).count;
+  await waitFor(() => reservationCount() === 0, 'abortInFlight cleanup did not finish');
+  const { state } = require('../services/limits');
+  assert.equal(upstreamDisconnects, before + 1);
+  assert.equal(reservationCount(), 0);
+  assert.equal(state().users[user.id], undefined);
+  assert.equal(state().models['abort-in-flight'], undefined);
+  assert.equal(state().providers[providerId], undefined);
 });
 
 test('online backup, retention, audit privacy, doctor, and Docker healthcheck are verifiable', async () => {

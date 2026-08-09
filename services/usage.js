@@ -111,7 +111,7 @@ function recordUsage(requestId, userId, model, inputTokens, outputTokens, durati
 
   runImmediate(() => {
     const reservation = db.prepare(`
-      SELECT output_tokens FROM quota_reservations
+      SELECT output_tokens, request_date FROM quota_reservations
       WHERE request_id = ? AND user_id = ?
     `).get(requestId, userId);
     if (!reservation) {
@@ -130,7 +130,7 @@ function recordUsage(requestId, userId, model, inputTokens, outputTokens, durati
         input_tokens = input_tokens + excluded.input_tokens,
         output_tokens = output_tokens + excluded.output_tokens,
         total_tokens = total_tokens + excluded.total_tokens
-    `).run(userId, utcDate(), inputTokens, outputTokens, totalTokens);
+    `).run(userId, reservation.request_date, inputTokens, outputTokens, totalTokens);
 
     db.prepare(`
       INSERT INTO request_logs

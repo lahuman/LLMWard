@@ -17,6 +17,24 @@ const allowedOrigins = config.corsOrigin === '*'
   : config.corsOrigin.split(',').map((origin) => origin.trim()).filter(Boolean);
 
 app.disable('x-powered-by');
+const contentSecurityPolicy = [
+  "default-src 'self'", "script-src 'self'", "style-src 'self'",
+  "img-src 'self' data:", "connect-src 'self'", "object-src 'none'",
+  "base-uri 'none'", "frame-ancestors 'none'", "form-action 'self'"
+].join('; ');
+
+app.use((req, res, next) => {
+  res.setHeader('Content-Security-Policy', contentSecurityPolicy);
+  res.setHeader('X-Frame-Options', 'DENY');
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('Referrer-Policy', 'no-referrer');
+  const requestPath = req.path.toLowerCase();
+  if (requestPath === '/admin-dashboard.html' || requestPath === '/admin' || requestPath.startsWith('/admin/')) {
+    res.setHeader('Cache-Control', 'no-store');
+  }
+  next();
+});
+
 app.use(cors({ origin: allowedOrigins }));
 app.use(express.json({ limit: '1mb' }));
 app.use(express.static(path.join(__dirname, 'public')));

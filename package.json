@@ -1,10 +1,10 @@
 {
   "name": "llm-gateway",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Lightweight on-premises LLM gateway",
   "main": "server.js",
   "engines": {
-    "node": ">=20"
+    "node": ">=22"
   },
   "scripts": {
     "start": "node server.js",
@@ -12,7 +12,8 @@
     "setup": "node scripts/setup.js",
     "doctor": "node scripts/doctor.js",
     "backup": "node scripts/backup.js",
-    "benchmark": "node scripts/benchmark.js"
+    "benchmark": "node scripts/benchmark.js",
+    "verify-backup": "node scripts/verify-backup.js"
   },
   "license": "MIT",
   "dependencies": {
