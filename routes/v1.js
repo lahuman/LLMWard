@@ -1,4 +1,5 @@
 const express = require('express');
+const { once } = require('node:events');
 const db = require('../db/database');
 const config = require('../config');
 const { validateToken } = require('../middleware/auth');
@@ -8,6 +9,7 @@ const { ApiError } = require('../services/errors');
 const { acquire } = require('../services/limits');
 
 const router = express.Router();
+const activeControllers = new Set();
 const IDENTIFIER = /^[a-z0-9][a-z0-9_.:/-]{0,199}$/;
 
 function modelPermissions(serialized) {
@@ -95,6 +97,7 @@ router.post('/chat/completions', validateToken, validateModelAccess, async (req,
   let clientDisconnected = false;
   const startedAt = Date.now();
   const controller = new AbortController();
+  activeControllers.add(controller);
   const disconnect = () => {
     if (!res.writableEnded) {
       clientDisconnected = true;
@@ -122,7 +125,7 @@ router.post('/chat/completions', validateToken, validateModelAccess, async (req,
     }
 
     if (req.body.stream === true) {
-      await relayStream(response, res, reservation, req.user.id, req.gatewayModel, startedAt);
+      await relayStream(response, res, reservation, req.user.id, req.gatewayModel, startedAt, controller.signal);
       reservation = null;
       return;
     }
@@ -166,13 +169,14 @@ router.post('/chat/completions', validateToken, validateModelAccess, async (req,
     else if (!res.writableEnded) res.destroy();
   } finally {
     clearTimeout(timeout);
+    activeControllers.delete(controller);
     res.off('close', disconnect);
     if (reservation) releaseReservation(reservation.requestId);
     if (releaseLimit) releaseLimit();
   }
 });
 
-async function relayStream(response, res, reservation, userId, model, startedAt) {
+async function relayStream(response, res, reservation, userId, model, startedAt, signal) {
   res.status(200);
   res.setHeader('Content-Type', response.headers.get('content-type') || 'text/event-stream; charset=utf-8');
   res.setHeader('Cache-Control', 'no-cache');
@@ -200,7 +204,7 @@ async function relayStream(response, res, reservation, userId, model, startedAt)
         }
       } catch {}
     }
-    if (!res.write(chunk)) await new Promise((resolve) => res.once('drain', resolve));
+    if (!res.write(chunk)) await once(res, 'drain', { signal });
   }
   res.end();
   recordUsage(reservation.requestId, userId, model, inputTokens, outputTokens, Date.now() - startedAt);
@@ -233,5 +237,10 @@ router.get('/usage', validateToken, (req, res, next) => {
   }
 });
 
+function abortInFlight() {
+  for (const controller of activeControllers) controller.abort();
+}
+
 module.exports = router;
 module.exports.modelPermissions = modelPermissions;
+module.exports.abortInFlight = abortInFlight;

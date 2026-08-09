@@ -2,6 +2,7 @@ const { test, before, after } = require('node:test');
 const assert = require('node:assert/strict');
 const crypto = require('node:crypto');
 const fs = require('node:fs');
+const { EventEmitter, once } = require('node:events');
 const http = require('node:http');
 const os = require('node:os');
 const path = require('node:path');
@@ -30,6 +31,7 @@ const providerCalls = new Map();
 const receivedMaximums = new Map();
 const receivedPayloads = new Map();
 const providerPaths = [];
+const providerEvents = new EventEmitter();
 let upstreamDisconnects = 0;
 
 function listen(server) {
@@ -38,6 +40,14 @@ function listen(server) {
 
 function close(server) {
   return new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+}
+
+async function waitFor(predicate, message) {
+  const deadline = Date.now() + 3000;
+  while (!predicate()) {
+    if (Date.now() >= deadline) throw new Error(message);
+    await new Promise((resolve) => setImmediate(resolve));
+  }
 }
 
 async function request(route, options = {}) {
@@ -126,6 +136,37 @@ before(async () => {
       res.writeHead(503, { 'Content-Type': 'application/json' });
       return res.end(JSON.stringify({ secret: 'provider-response-must-not-be-stored' }));
     }
+    if (payload.model === 'backpressure') {
+      res.once('close', () => {
+        if (!res.writableEnded) upstreamDisconnects += 1;
+        providerEvents.emit('backpressure:closed');
+      });
+      res.writeHead(200, { 'Content-Type': 'text/event-stream' });
+      providerEvents.emit('backpressure:started');
+      const chunk = `data: ${JSON.stringify({ choices: [{ delta: { content: 'x'.repeat(64 * 1024) } }] })}\n\n`;
+      while (!res.destroyed && !res.writableEnded) {
+        if (!res.write(chunk)) {
+          await new Promise((resolve) => {
+            const done = () => {
+              res.off('drain', done);
+              res.off('close', done);
+              resolve();
+            };
+            res.once('drain', done);
+            res.once('close', done);
+          });
+        }
+      }
+      return;
+    }
+    if (payload.model === 'abort-in-flight') {
+      res.once('close', () => {
+        if (!res.writableEnded) upstreamDisconnects += 1;
+        providerEvents.emit('abort-in-flight:closed');
+      });
+      providerEvents.emit('abort-in-flight:started');
+      return;
+    }
     if (payload.model === 'concurrent' || payload.model.includes('concurrency') || payload.model === 'disconnect') {
       if (payload.model === 'disconnect') {
         res.once('close', () => { if (!res.writableEnded) upstreamDisconnects += 1; });
@@ -164,7 +205,7 @@ before(async () => {
   });
   assert.equal(provider.status, 201);
   providerId = provider.body.id;
-  for (const [name, maxTokens] of [['standard', 8], ['input-limit', 4], ['output-limit', 2], ['concurrent', 4], ['atomic-fail', 2], ['unpriced', 4], ['inactive-model', 4], ['streaming', 4], ['user-concurrency', 4], ['model-concurrency', 4], ['disconnect', 4], ['privacy', 4]]) {
+  for (const [name, maxTokens] of [['standard', 8], ['input-limit', 4], ['output-limit', 2], ['concurrent', 4], ['atomic-fail', 2], ['unpriced', 4], ['inactive-model', 4], ['streaming', 4], ['backpressure', 4], ['abort-in-flight', 4], ['user-concurrency', 4], ['model-concurrency', 4], ['disconnect', 4], ['privacy', 4]]) {
     const model = await admin('/admin/models', {
       method: 'POST', body: { model_name: name, display_name: name, provider_id: providerId, max_tokens: maxTokens }
     });
@@ -762,6 +803,77 @@ test('client disconnect aborts upstream and releases quota and concurrency', asy
   assert.equal(db.prepare('SELECT COUNT(*) AS count FROM quota_reservations WHERE user_id = ?').get(user.id).count, 0);
   const { state } = require('../services/limits');
   assert.equal(state().users[user.id], undefined);
+});
+
+test('streaming backpressure aborts upstream and releases quota and concurrency', async () => {
+  const user = await createUser('backpressure-user', ['backpressure']);
+  const before = upstreamDisconnects;
+  const started = once(providerEvents, 'backpressure:started', { signal: AbortSignal.timeout(3000) });
+  const closed = once(providerEvents, 'backpressure:closed', { signal: AbortSignal.timeout(3000) });
+  const client = http.request(`${baseUrl}/v1/chat/completions`, {
+    method: 'POST', headers: { Authorization: `Bearer ${user.token}`, 'Content-Type': 'application/json' }
+  });
+  client.on('error', () => {});
+  client.on('response', (response) => {
+    response.once('error', () => {});
+    client.destroy();
+  });
+  client.end(JSON.stringify({
+    model: 'backpressure', stream: true,
+    messages: [{ role: 'user', content: 'backpressure-secret' }], max_tokens: 1
+  }));
+
+  await started;
+  await closed;
+  const reservationCount = () => db.prepare(
+    'SELECT COUNT(*) AS count FROM quota_reservations WHERE user_id = ?'
+  ).get(user.id).count;
+  await waitFor(() => reservationCount() === 0, 'backpressure cleanup did not finish');
+  const { state } = require('../services/limits');
+  assert.equal(upstreamDisconnects, before + 1);
+  assert.equal(reservationCount(), 0);
+  assert.equal(state().users[user.id], undefined);
+  assert.equal(state().models.backpressure, undefined);
+  assert.equal(state().providers[providerId], undefined);
+});
+
+test('abortInFlight aborts active requests and cleanup is idempotent', async (t) => {
+  const user = await createUser('abort-in-flight-user', ['abort-in-flight']);
+  const before = upstreamDisconnects;
+  const started = once(providerEvents, 'abort-in-flight:started', { signal: AbortSignal.timeout(3000) });
+  const closed = once(providerEvents, 'abort-in-flight:closed', { signal: AbortSignal.timeout(3000) });
+  let client;
+  const completed = new Promise((resolve) => {
+    client = http.request(`${baseUrl}/v1/chat/completions`, {
+      method: 'POST', headers: { Authorization: `Bearer ${user.token}`, 'Content-Type': 'application/json' }
+    }, (response) => {
+      response.resume();
+      response.once('end', resolve);
+    });
+    client.once('error', resolve);
+    client.end(JSON.stringify({
+      model: 'abort-in-flight', messages: [{ role: 'user', content: 'abort-secret' }], max_tokens: 1
+    }));
+  });
+  t.after(() => client.destroy());
+
+  await started;
+  const v1 = require('../routes/v1');
+  assert.equal(typeof v1.abortInFlight, 'function');
+  v1.abortInFlight();
+  v1.abortInFlight();
+  await closed;
+  await completed;
+  const reservationCount = () => db.prepare(
+    'SELECT COUNT(*) AS count FROM quota_reservations WHERE user_id = ?'
+  ).get(user.id).count;
+  await waitFor(() => reservationCount() === 0, 'abortInFlight cleanup did not finish');
+  const { state } = require('../services/limits');
+  assert.equal(upstreamDisconnects, before + 1);
+  assert.equal(reservationCount(), 0);
+  assert.equal(state().users[user.id], undefined);
+  assert.equal(state().models['abort-in-flight'], undefined);
+  assert.equal(state().providers[providerId], undefined);
 });
 
 test('online backup, retention, audit privacy, doctor, and Docker healthcheck are verifiable', async () => {
