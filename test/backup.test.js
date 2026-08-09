@@ -351,3 +351,131 @@ test('backup publication never replaces an existing collision target', () => {
   );
   live.close();
 });
+
+test('writable artifact close failure preserves the body error and generic cleanup status', () => {
+  const livePath = fixturePath(path.join('body-close-failure', 'live.db'));
+  createCurrentSchema(livePath);
+  const script = [
+    "const path=require('node:path')",
+    "const Database=require('better-sqlite3')",
+    "const db=require('./db/database')",
+    "const originalPragma=Database.prototype.pragma",
+    "Database.prototype.pragma=function(sql,options){if(path.basename(this.name).startsWith('.')&&sql==='wal_checkpoint(TRUNCATE)')throw new Error('artifact-body-primary-marker');return originalPragma.call(this,sql,options)}",
+    "const originalClose=Database.prototype.close",
+    "Database.prototype.close=function(){const hidden=path.basename(this.name).startsWith('.');const result=originalClose.call(this);if(hidden)throw new Error('artifact-close-secondary-marker');return result}",
+    "require('./services/backup').createBackup().then(()=>{process.stderr.write('unexpected success');process.exitCode=1}).catch(error=>process.stdout.write(JSON.stringify({message:error.message,cleanupIncomplete:error.cleanupIncomplete===true,failureAuditFailed:error.failureAuditFailed===true}))).finally(()=>db.close())"
+  ].join(';');
+  const result = child(script, livePath);
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+  assert.deepEqual(JSON.parse(result.stdout), {
+    message: 'artifact-body-primary-marker', cleanupIncomplete: true, failureAuditFailed: false
+  });
+  assert.deepEqual(fs.readdirSync(path.join(path.dirname(livePath), 'backups')), []);
+
+  const live = new Database(livePath, { readonly: true, fileMustExist: true });
+  const history = historyCount(live);
+  const successAudits = successAuditCount(live);
+  const failure = live.prepare(`
+    SELECT target_type, target_id, changed_fields FROM audit_logs
+    WHERE action = 'backup.create' AND success = 0
+  `).get();
+  live.close();
+  assert.equal(history, 0);
+  assert.equal(successAudits, 0);
+  assert.deepEqual(failure, {
+    target_type: 'database', target_id: null, changed_fields: '[\"cleanupIncomplete\"]'
+  });
+  const serializedFailure = JSON.stringify(failure);
+  assert.equal(serializedFailure.includes('artifact-body-primary-marker'), false);
+  assert.equal(serializedFailure.includes('artifact-close-secondary-marker'), false);
+  assert.equal(serializedFailure.includes(temporaryDirectory), false);
+});
+
+test('writable artifact close-only failure is primary and marks cleanup incomplete', () => {
+  const livePath = fixturePath(path.join('close-only-failure', 'live.db'));
+  createCurrentSchema(livePath);
+  const script = [
+    "const path=require('node:path')",
+    "const Database=require('better-sqlite3')",
+    "const db=require('./db/database')",
+    "const originalClose=Database.prototype.close",
+    "Database.prototype.close=function(){const hidden=path.basename(this.name).startsWith('.');const result=originalClose.call(this);if(hidden)throw new Error('artifact-close-primary-marker');return result}",
+    "require('./services/backup').createBackup().then(()=>{process.stderr.write('unexpected success');process.exitCode=1}).catch(error=>process.stdout.write(JSON.stringify({message:error.message,cleanupIncomplete:error.cleanupIncomplete===true,failureAuditFailed:error.failureAuditFailed===true}))).finally(()=>db.close())"
+  ].join(';');
+  const result = child(script, livePath);
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+  assert.deepEqual(JSON.parse(result.stdout), {
+    message: 'artifact-close-primary-marker', cleanupIncomplete: true, failureAuditFailed: false
+  });
+  assert.deepEqual(fs.readdirSync(path.join(path.dirname(livePath), 'backups')), []);
+
+  const live = new Database(livePath, { readonly: true, fileMustExist: true });
+  const failure = live.prepare(`
+    SELECT changed_fields FROM audit_logs WHERE action = 'backup.create' AND success = 0
+  `).get();
+  live.close();
+  assert.deepEqual(failure, { changed_fields: '[\"cleanupIncomplete\"]' });
+});
+
+test('temp unlink failure after link cleans both owned main names and preserves final sidecars', () => {
+  const livePath = fixturePath(path.join('temp-unlink-failure', 'live.db'));
+  createCurrentSchema(livePath);
+  const finalUuid = '33333333-3333-4333-8333-333333333333';
+  const tempUuid = '44444444-4444-4444-8444-444444444444';
+  const fixedTime = '2026-02-03T04:05:06.789Z';
+  const filename = `gateway-2026-02-03T04-05-06-789Z-${finalUuid}.db`;
+  const backupDirectory = path.join(path.dirname(livePath), 'backups');
+  fs.mkdirSync(backupDirectory, { recursive: true });
+  const finalWal = path.join(backupDirectory, `${filename}-wal`);
+  const finalShm = path.join(backupDirectory, `${filename}-shm`);
+  const sentinel = path.join(backupDirectory, 'unrelated-sentinel.txt');
+  fs.writeFileSync(finalWal, 'final-wal-must-survive');
+  fs.writeFileSync(finalShm, 'final-shm-must-survive');
+  fs.writeFileSync(sentinel, 'unrelated-must-survive');
+
+  const script = [
+    "const fs=require('node:fs')",
+    "const path=require('node:path')",
+    "const crypto=require('node:crypto')",
+    "const db=require('./db/database')",
+    `const filename='${filename}'`,
+    `const uuids=['${finalUuid}','${tempUuid}']`,
+    "crypto.randomUUID=()=>uuids.shift()",
+    `const fixedTime='${fixedTime}'`,
+    "const OriginalDate=Date",
+    "global.Date=class extends OriginalDate{constructor(...args){super(...(args.length?args:[fixedTime]))}static now(){return new OriginalDate(fixedTime).valueOf()}}",
+    "const originalUnlink=fs.unlinkSync",
+    "let tempMainAttempts=0",
+    "let finalMainAttempts=0",
+    "let finalSidecarAttempts=0",
+    "fs.unlinkSync=function(file){const name=path.basename(file);if(name.startsWith('.')&&name.endsWith('.tmp')){tempMainAttempts++;if(tempMainAttempts===1){const error=new Error('temp-unlink-primary-marker');error.code='EBUSY';throw error}}if(name===filename)finalMainAttempts++;if(name===filename+'-wal'||name===filename+'-shm')finalSidecarAttempts++;return originalUnlink.call(this,file)}",
+    "require('./services/backup').createBackup().then(()=>{process.stderr.write('unexpected success');process.exitCode=1}).catch(error=>process.stdout.write(JSON.stringify({message:error.message,cleanupIncomplete:error.cleanupIncomplete===true,failureAuditFailed:error.failureAuditFailed===true,tempMainAttempts,finalMainAttempts,finalSidecarAttempts}))).finally(()=>db.close())"
+  ].join(';');
+  const result = child(script, livePath);
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+  assert.deepEqual(JSON.parse(result.stdout), {
+    message: 'temp-unlink-primary-marker',
+    cleanupIncomplete: false,
+    failureAuditFailed: false,
+    tempMainAttempts: 2,
+    finalMainAttempts: 1,
+    finalSidecarAttempts: 0
+  });
+  assert.deepEqual(fs.readdirSync(backupDirectory).sort(), [
+    `${filename}-shm`, `${filename}-wal`, 'unrelated-sentinel.txt'
+  ].sort());
+  assert.equal(fs.readFileSync(finalWal, 'utf8'), 'final-wal-must-survive');
+  assert.equal(fs.readFileSync(finalShm, 'utf8'), 'final-shm-must-survive');
+  assert.equal(fs.readFileSync(sentinel, 'utf8'), 'unrelated-must-survive');
+
+  const live = new Database(livePath, { readonly: true, fileMustExist: true });
+  const history = historyCount(live);
+  const successAudits = successAuditCount(live);
+  const failure = live.prepare(`
+    SELECT changed_fields FROM audit_logs WHERE action = 'backup.create' AND success = 0
+  `).get();
+  live.close();
+  assert.equal(history, 0);
+  assert.equal(successAudits, 0);
+  assert.deepEqual(failure, { changed_fields: '[]' });
+});

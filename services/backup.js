@@ -40,6 +40,7 @@ async function createBackup() {
 
     await db.backup(temporaryPath);
     let backup;
+    let artifactError;
     try {
       backup = new Database(temporaryPath, { fileMustExist: true });
       recordHistory(backup, filename, createdAt);
@@ -50,8 +51,21 @@ async function createBackup() {
       if (backup.pragma('journal_mode = DELETE', { simple: true }) !== 'delete') {
         throw new Error('Backup journal could not be finalized');
       }
+    } catch (error) {
+      artifactError = error;
+      throw error;
     } finally {
-      if (backup && backup.open) backup.close();
+      if (backup && backup.open) {
+        try {
+          backup.close();
+        } catch (closeError) {
+          if (artifactError) artifactError.cleanupIncomplete = true;
+          else {
+            closeError.cleanupIncomplete = true;
+            throw closeError;
+          }
+        }
+      }
     }
 
     for (const sidecar of [`${temporaryPath}-wal`, `${temporaryPath}-shm`]) {
@@ -84,7 +98,7 @@ async function createBackup() {
     }
     if (ownsDestination && destination) ownedFiles.push(destination);
 
-    let cleanupIncomplete = false;
+    let cleanupIncomplete = error.cleanupIncomplete === true;
     for (const ownedFile of ownedFiles) {
       try {
         fs.unlinkSync(ownedFile);
