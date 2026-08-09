@@ -12,7 +12,8 @@
     "setup": "node scripts/setup.js",
     "doctor": "node scripts/doctor.js",
     "backup": "node scripts/backup.js",
-    "benchmark": "node scripts/benchmark.js"
+    "benchmark": "node scripts/benchmark.js",
+    "verify-backup": "node scripts/verify-backup.js"
   },
   "license": "MIT",
   "dependencies": {

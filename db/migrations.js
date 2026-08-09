@@ -1,7 +1,6 @@
 const crypto = require('crypto');
 const db = require('./database');
-
-const SCHEMA_VERSION = 2;
+const { SCHEMA_VERSION } = require('./schema');
 
 const REQUIRED_COLUMNS = {
   users: [
