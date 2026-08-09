@@ -1,12 +1,16 @@
 const db = require('../db/database');
 const config = require('../config');
 const { ApiError } = require('./errors');
-const ENCODED_SEPARATOR = /%2f|%5c/i;
-const DOT_SEGMENT = /(?:^|\/)(?:(?:\.|%2e){1,2})(?:\/|$)/i;
+const QUERY_OR_FRAGMENT = /[?#]/;
+const ENCODED_SEPARATOR = /%(?:25)*(?:2f|5c)/i;
+const DOT_SEGMENT = /(?:^|\/)(?:(?:\.|%(?:25)*2e){1,2})(?:\/|$)/i;
 
 function normalizeProviderBaseUrl(value) {
   const raw = String(value).trim();
-  if (ENCODED_SEPARATOR.test(raw) || DOT_SEGMENT.test(raw)) {
+  if (QUERY_OR_FRAGMENT.test(raw)) {
+    throw new ApiError(400, 'base_url must be an HTTP(S) URL without credentials, query, or fragment', 'invalid_request');
+  }
+  if (raw.includes('\\') || ENCODED_SEPARATOR.test(raw) || DOT_SEGMENT.test(raw)) {
     throw new ApiError(400, 'base_url contains an unsafe path', 'invalid_request');
   }
   let parsed;

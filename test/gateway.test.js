@@ -80,6 +80,26 @@ function chat(token, model, maxTokens) {
   });
 }
 
+function unsafeProviderBaseUrls() {
+  return [
+    `${providerBaseUrl}?mode=unsafe`,
+    `${providerBaseUrl}#fragment`,
+    `${providerBaseUrl}?`,
+    `${providerBaseUrl}#`,
+    `${providerBaseUrl}/../escape`,
+    `${providerBaseUrl}/%2e%2e/escape`,
+    `${providerBaseUrl}/openai\\v1`,
+    `${providerBaseUrl}/a/%2e%2e\\escape`,
+    `${providerBaseUrl}/a/.%2e/escape`,
+    `${providerBaseUrl}/a/%2e./escape`,
+    `${providerBaseUrl}/openai%2fv1`,
+    `${providerBaseUrl}/openai%5cv1`,
+    `${providerBaseUrl}/openai/%252e/v1`,
+    `${providerBaseUrl}/openai%252fv1`,
+    `${providerBaseUrl}/openai%255cv1`
+  ];
+}
+
 before(async () => {
   providerServer = http.createServer(async (req, res) => {
     providerPaths.push(req.url);
@@ -434,20 +454,39 @@ test('admin input validation rejects unsafe values and references', async () => 
 });
 
 test('provider Base URLs reject query fragment traversal and encoded separators', async () => {
-  const unsafeUrls = [
-    `${providerBaseUrl}?mode=unsafe`,
-    `${providerBaseUrl}#fragment`,
-    `${providerBaseUrl}/../escape`,
-    `${providerBaseUrl}/%2e%2e/escape`,
-    `${providerBaseUrl}/openai%2fv1`,
-    `${providerBaseUrl}/openai%5cv1`
-  ];
+  const unsafeUrls = unsafeProviderBaseUrls();
   for (const [index, base_url] of unsafeUrls.entries()) {
     const response = await admin('/admin/providers', {
       method: 'POST',
       body: { provider_name: `unsafe-${index}`, display_name: 'Unsafe', base_url, auth_type: 'none' }
     });
     assert.equal(response.status, 400);
+    assert.equal(response.body.code, 'invalid_request');
+  }
+});
+
+test('provider Base URL updates reject unsafe forms without changing the stored canonical URL', async () => {
+  const provider = await admin('/admin/providers', {
+    method: 'POST',
+    body: {
+      provider_name: 'base-path-update-provider',
+      display_name: 'Base Path Update',
+      base_url: `HTTP://127.0.0.1:${providerServer.address().port}/openai/v1/`,
+      auth_type: 'none'
+    }
+  });
+  assert.equal(provider.status, 201);
+  const canonicalUrl = `${providerBaseUrl}/openai/v1`;
+  assert.equal(provider.body.base_url, canonicalUrl);
+
+  for (const base_url of unsafeProviderBaseUrls()) {
+    const response = await admin(`/admin/providers/${provider.body.id}`, {
+      method: 'PUT', body: { base_url }
+    });
+    assert.equal(response.status, 400);
+    assert.equal(response.body.code, 'invalid_request');
+    const stored = (await admin('/admin/providers')).body.find((item) => item.id === provider.body.id);
+    assert.equal(stored.base_url, canonicalUrl);
   }
 });
 
@@ -463,6 +502,17 @@ test('provider Base URLs are canonical and fixed endpoints preserve the base pat
   });
   assert.equal(provider.status, 201);
   assert.equal(provider.body.base_url, `${providerBaseUrl}/openai/v1`);
+  const encodedPathProvider = await admin('/admin/providers', {
+    method: 'POST',
+    body: {
+      provider_name: 'encoded-path-provider',
+      display_name: 'Encoded Path',
+      base_url: `${providerBaseUrl}/openai%20gateway/v1/`,
+      auth_type: 'none'
+    }
+  });
+  assert.equal(encodedPathProvider.status, 201);
+  assert.equal(encodedPathProvider.body.base_url, `${providerBaseUrl}/openai%20gateway/v1`);
 
   const pathStart = providerPaths.length;
   assert.equal((await admin(`/admin/providers/${provider.body.id}/discover-models`)).status, 200);
