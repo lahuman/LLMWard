@@ -56,11 +56,13 @@ async function waitForHealth(url, child) {
 test('SIGTERM aborts held requests and exits cleanly before the force limit', async (t) => {
   const temporaryDirectory = fs.mkdtempSync(path.join(os.tmpdir(), 'llm-gateway-server-test-'));
   const databasePath = path.join(temporaryDirectory, 'server.test.db');
-  const adminKey = crypto.randomBytes(32).toString('base64url');
-  const providerKey = crypto.randomBytes(24).toString('base64url');
-  const promptMarker = `shutdown-${crypto.randomBytes(12).toString('hex')}`;
+  const adminKey = `admin-${crypto.randomBytes(32).toString('base64url')}`;
+  const providerKey = `provider-${crypto.randomBytes(24).toString('base64url')}`;
+  const promptMarker = `prompt-${crypto.randomBytes(12).toString('hex')}`;
   const providerEvents = new EventEmitter();
   let upstreamCloses = 0;
+  let receivedProviderAuthorization;
+  let receivedPromptMarker;
   let child;
 
   const providerServer = http.createServer(async (req, res) => {
@@ -71,6 +73,8 @@ test('SIGTERM aborts held requests and exits cleanly before the force limit', as
     let raw = '';
     for await (const chunk of req) raw += chunk;
     const payload = JSON.parse(raw);
+    receivedProviderAuthorization = req.headers.authorization;
+    receivedPromptMarker = payload.messages && payload.messages[0] && payload.messages[0].content;
     if (payload.model !== 'shutdown-held') {
       res.writeHead(404);
       return res.end();
@@ -106,7 +110,7 @@ test('SIGTERM aborts held requests and exits cleanly before the force limit', as
     PORT: String(port),
     KERNEXA_TIMEOUT: '30000',
     CORS_ORIGIN: 'http://127.0.0.1',
-    LOG_LEVEL: 'silent'
+    LOG_LEVEL: 'info'
   };
   if (process.platform === 'win32') {
     childEnvironment.SystemRoot = process.env.SystemRoot;
@@ -161,10 +165,12 @@ test('SIGTERM aborts held requests and exits cleanly before the force limit', as
     }
   });
   assert.equal(user.status, 201);
+  const userToken = user.body.apiToken;
+  assert.equal(new Set([adminKey, providerKey, userToken, promptMarker]).size, 4);
   const started = once(providerEvents, 'started', { signal: AbortSignal.timeout(3000) });
   const closed = once(providerEvents, 'closed', { signal: AbortSignal.timeout(3000) });
   const heldRequest = request(`${baseUrl}/v1/chat/completions`, {
-    method: 'POST', headers: { Authorization: `Bearer ${user.body.apiToken}` },
+    method: 'POST', headers: { Authorization: `Bearer ${userToken}` },
     body: {
       model: 'shutdown-held', messages: [{ role: 'user', content: promptMarker }], max_tokens: 1
     }
@@ -180,12 +186,16 @@ test('SIGTERM aborts held requests and exits cleanly before the force limit', as
   assert.equal(exitSignal, null);
   assert.equal(exitCode, 0);
   assert.equal(upstreamCloses, 1);
+  assert.equal(receivedProviderAuthorization, `Bearer ${providerKey}`);
+  assert.equal(receivedPromptMarker, promptMarker);
   const migrated = new Database(databasePath, { readonly: true });
   assert.equal(migrated.prepare('SELECT COUNT(*) AS count FROM quota_reservations').get().count, 0);
   migrated.close();
   const output = stdout + stderr;
-  assert.equal(output.includes(adminKey), false);
-  assert.equal(output.includes(providerKey), false);
-  assert.equal(output.includes(user.body.apiToken), false);
-  assert.equal(output.includes(promptMarker), false);
+  assert.equal(output.includes('LLM Gateway server started'), true);
+  assert.equal(output.includes('Shutdown requested'), true);
+  assert.equal(output.includes('"signal":"SIGTERM"'), true);
+  for (const secret of [adminKey, providerKey, userToken, promptMarker]) {
+    assert.equal(output.includes(secret), false);
+  }
 });

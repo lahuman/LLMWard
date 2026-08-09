@@ -843,18 +843,15 @@ test('abortInFlight aborts active requests and cleanup is idempotent', async (t)
   const started = once(providerEvents, 'abort-in-flight:started', { signal: AbortSignal.timeout(3000) });
   const closed = once(providerEvents, 'abort-in-flight:closed', { signal: AbortSignal.timeout(3000) });
   let client;
-  const completed = new Promise((resolve) => {
-    client = http.request(`${baseUrl}/v1/chat/completions`, {
-      method: 'POST', headers: { Authorization: `Bearer ${user.token}`, 'Content-Type': 'application/json' }
-    }, (response) => {
-      response.resume();
-      response.once('end', resolve);
-    });
-    client.once('error', resolve);
-    client.end(JSON.stringify({
-      model: 'abort-in-flight', messages: [{ role: 'user', content: 'abort-secret' }], max_tokens: 1
-    }));
+  client = http.request(`${baseUrl}/v1/chat/completions`, {
+    method: 'POST', headers: { Authorization: `Bearer ${user.token}`, 'Content-Type': 'application/json' }
+  }, (response) => {
+    response.resume();
   });
+  const completed = once(client, 'close', { signal: AbortSignal.timeout(3000) });
+  client.end(JSON.stringify({
+    model: 'abort-in-flight', messages: [{ role: 'user', content: 'abort-secret' }], max_tokens: 1
+  }));
   t.after(() => client.destroy());
 
   await started;
