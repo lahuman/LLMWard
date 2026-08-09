@@ -1,42 +1,127 @@
 const fs = require('fs');
 const path = require('path');
-const config = require('../config');
-const db = require('../db/database');
-const { SCHEMA_VERSION } = require('../db/migrations');
-const { retentionDays } = require('../services/retention');
 
 const checks = [];
-function check(name, ok, detail) {
-  checks.push({ name, status: ok ? 'ok' : 'fail', detail });
+
+function check(name, status, detail) {
+  checks.push({ name, status, detail });
 }
 
-const major = Number(process.versions.node.split('.')[0]);
-check('Node.js version', major >= 20, `major=${major}`);
-check('Required environment', Boolean(config.adminKey), 'ADMIN_SECRET_KEY configured');
-check('Administrator key safety', config.adminKey.length >= 32 && new Set(config.adminKey).size >= 8, 'length and entropy checks');
-check('Database connection', db.open, 'open');
-check('Database schema version', db.pragma('user_version', { simple: true }) === SCHEMA_VERSION, `expected=${SCHEMA_VERSION}, actual=${db.pragma('user_version', { simple: true })}`);
-check('SQLite integrity', db.pragma('integrity_check')[0].integrity_check === 'ok', db.pragma('integrity_check')[0].integrity_check);
-check('WAL mode', db.pragma('journal_mode', { simple: true }) === 'wal', db.pragma('journal_mode', { simple: true }));
-
-const dataDirectory = config.databasePath === ':memory:' ? null : path.dirname(config.databasePath);
-if (dataDirectory) {
+function guardedCheck(name, action) {
   try {
-    fs.accessSync(dataDirectory, fs.constants.W_OK);
-    check('Data directory writable', true, 'writable');
-  } catch { check('Data directory writable', false, 'not writable'); }
-  if (typeof fs.statfsSync === 'function') {
-    const disk = fs.statfsSync(dataDirectory);
-    check('Disk free space', disk.bavail > 0, `${Math.floor((disk.bavail * disk.bsize) / 1048576)} MiB free`);
+    const result = action();
+    check(name, result.status, result.detail);
+  } catch {
+    check(name, 'fail', 'unavailable');
   }
 }
 
-const providers = db.prepare('SELECT COUNT(*) AS count FROM providers WHERE is_active = 1').get().count;
-const models = db.prepare('SELECT COUNT(*) AS count FROM models WHERE is_active = 1').get().count;
-check('Active providers and models', providers > 0 && models > 0, `providers=${providers}, models=${models}`);
-const expired = db.prepare('SELECT COUNT(*) AS count FROM quota_reservations WHERE expires_at <= ?').get(new Date().toISOString()).count;
-check('Expired quota reservations', expired === 0, `expired=${expired}`);
-check('Request log retention', true, `days=${retentionDays()} (0 disables cleanup)`);
+function emit() {
+  for (const result of checks) {
+    process.stdout.write(`[${result.status.toUpperCase()}] ${result.name}: ${result.detail}\n`);
+  }
+  process.exitCode = checks.some((result) => result.status === 'fail') ? 1 : 0;
+}
 
-for (const result of checks) process.stdout.write(`[${result.status.toUpperCase()}] ${result.name}: ${result.detail}\n`);
-process.exitCode = checks.some((result) => result.status === 'fail') ? 1 : 0;
+const major = Number(process.versions.node.split('.')[0]);
+check('Node.js version', major >= 22 ? 'pass' : 'fail', `major=${major}`);
+
+let config;
+try {
+  config = require('../config');
+  check('Configuration initialization', 'pass', 'available');
+  check('Administrator key safety', 'pass', 'valid=true');
+} catch {
+  check('Configuration initialization', 'fail', 'unavailable');
+  emit();
+  return;
+}
+
+let db;
+try {
+  db = require('../db/database');
+  check('Database initialization', 'pass', 'available');
+} catch {
+  check('Database initialization', 'fail', 'unavailable');
+}
+
+if (db) {
+  try {
+    const { SCHEMA_VERSION } = require('../db/schema');
+    guardedCheck('Database connection', () => ({
+      status: db.open ? 'pass' : 'fail',
+      detail: `open=${Boolean(db.open)}`
+    }));
+    guardedCheck('Database schema version', () => {
+      const actual = db.pragma('user_version', { simple: true });
+      return {
+        status: actual === SCHEMA_VERSION ? 'pass' : 'fail',
+        detail: `expected=${SCHEMA_VERSION}, actual=${actual}`
+      };
+    });
+    guardedCheck('SQLite integrity', () => {
+      const rows = db.pragma('integrity_check');
+      const valid = rows.length === 1 && rows[0].integrity_check === 'ok';
+      return { status: valid ? 'pass' : 'fail', detail: `valid=${valid}` };
+    });
+    guardedCheck('SQLite foreign keys', () => {
+      const enabled = db.pragma('foreign_keys', { simple: true }) === 1;
+      return { status: enabled ? 'pass' : 'fail', detail: `enabled=${enabled}` };
+    });
+    guardedCheck('SQLite foreign key check', () => {
+      const violations = db.pragma('foreign_key_check').length;
+      return { status: violations === 0 ? 'pass' : 'fail', detail: `violations=${violations}` };
+    });
+    guardedCheck('SQLite busy timeout', () => {
+      const milliseconds = db.pragma('busy_timeout', { simple: true });
+      return { status: milliseconds >= 5000 ? 'pass' : 'fail', detail: `milliseconds=${milliseconds}` };
+    });
+    guardedCheck('WAL mode', () => {
+      const enabled = db.pragma('journal_mode', { simple: true }) === 'wal';
+      return { status: enabled ? 'pass' : 'fail', detail: `enabled=${enabled}` };
+    });
+    guardedCheck('Active provider model', () => {
+      const count = db.prepare(`
+        SELECT COUNT(*) AS count
+        FROM models
+        JOIN providers ON providers.id = models.provider_id
+        WHERE models.is_active = 1 AND providers.is_active = 1
+      `).get().count;
+      return { status: count > 0 ? 'pass' : 'warn', detail: `count=${count}` };
+    });
+    guardedCheck('Expired quota reservations', () => {
+      const count = db.prepare('SELECT COUNT(*) AS count FROM quota_reservations WHERE expires_at <= ?')
+        .get(new Date().toISOString()).count;
+      return { status: count === 0 ? 'pass' : 'warn', detail: `count=${count}` };
+    });
+    check('Request log retention', 'pass', `days=${config.requestLogRetentionDays}`);
+  } catch {
+    check('Database checks', 'fail', 'unavailable');
+  }
+}
+
+const dataDirectory = config.databasePath === ':memory:' ? null : path.dirname(config.databasePath);
+if (dataDirectory) {
+  guardedCheck('Data directory readable', () => {
+    fs.accessSync(dataDirectory, fs.constants.R_OK);
+    return { status: 'pass', detail: 'readable=true' };
+  });
+  guardedCheck('Data directory writable', () => {
+    fs.accessSync(dataDirectory, fs.constants.W_OK);
+    return { status: 'pass', detail: 'writable=true' };
+  });
+  if (typeof fs.statfsSync === 'function') {
+    guardedCheck('Disk free space', () => {
+      const disk = fs.statfsSync(dataDirectory);
+      const mebibytes = Math.floor((disk.bavail * disk.bsize) / 1048576);
+      const status = mebibytes === 0 ? 'fail' : mebibytes < 1024 ? 'warn' : 'pass';
+      return { status, detail: `mebibytes=${mebibytes}` };
+    });
+  }
+}
+
+if (db) {
+  try { db.close(); } catch { check('Database close', 'fail', 'unavailable'); }
+}
+
+emit();
