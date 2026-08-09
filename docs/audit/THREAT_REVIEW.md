@@ -22,7 +22,7 @@ LLMWard는 한 관리자와 100명 이하 사용자를 전제로 한 단일 Node
 - output quota 예약은 `BEGIN IMMEDIATE` transaction으로 직렬화되어 동시 oversubscription을 방지한다.
 - 성공, 오류, timeout, downstream disconnect, shutdown은 같은 멱등 cleanup 경로로 quota와 concurrency를 해제한다.
 - provider Base URL은 query, fragment, 자격증명, traversal, 인코딩 경로 구분자를 거부하고 고정 endpoint를 URL API로 결합한다.
-- migration은 real target을 SQLite로 열기 전 file type과 read-only header를 검사한다. nonempty WAL은 보호된 data 디렉터리의 고유한 직접 자식에 둔 private main/WAL copy로 검사하고 writable-open에서 재검사한다. sidecar가 없는 0-byte regular file만 신규 DB로 허용하며 sidecar, 비정규 파일, stat 오류, integrity, foreign-key, 필수 컬럼 위반과 private cleanup 실패는 fail closed 처리한다. startup `VACUUM`은 실행하지 않는다.
+- migration은 real target을 SQLite로 열기 전 file type과 read-only header를 검사한다. nonempty WAL은 보호된 data 디렉터리의 고유한 직접 자식에 둔 private main/WAL copy로 검사하고 writable-open에서 재검사한다. sidecar가 없는 missing path 또는 0-byte regular file만 신규 DB로 허용하며 orphaned sidecar는 main 생성이나 sidecar 변경 없이 거부한다. 비정규 파일, stat 오류, integrity, foreign-key, 필수 컬럼 위반과 private cleanup 실패도 fail closed 처리한다. startup `VACUUM`은 실행하지 않는다.
 - backup은 POSIX에서 `0o600`으로 생성하고 게시 전에 독립 연결에서 integrity, foreign key, 정확한 schema version을 검사하며 `verify-backup` 명령으로 복원 후보를 읽기 전용 검증한다. Windows에서는 data와 backup 위치의 보호 NTFS ACL을 Gateway 서비스 계정으로 제한하는 배포 통제가 필요하다.
 - 관리자 응답은 CSP, frame 방지, nosniff, referrer, no-store 정책을 적용하고 dashboard는 외부 asset과 안전한 DOM sink를 사용한다.
 - Docker build context는 환경 파일, SQLite DB·WAL·SHM·rollback journal·backup 변형, coverage·log와 로컬 scratch directory를 루트 및 중첩 경로에서 제외한다.

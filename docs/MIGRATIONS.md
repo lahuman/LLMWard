@@ -4,7 +4,7 @@
 
 Before SQLite opens an existing target, startup validates its file type and header. A nonempty WAL is checked with private main/WAL copies in a unique `.llmward-schema-preflight-*` direct child of the database directory. This inherits the protected data-directory ACL on Windows; POSIX additionally applies `0700` to the directory and `0600` to both files. Cleanup removes only that generated directory and fails closed without exposing its path if removal fails.
 
-An existing zero-length regular database file is treated as new only when `-wal`, `-shm`, and `-journal` entries are all absent. Startup checks the file and sidecars again before opening it. Any sidecar, nonregular file, stat error, corrupt nonempty header, or future schema fails closed.
+A missing database path or existing zero-length regular database file is treated as new only when `-wal`, `-shm`, and `-journal` entries are all absent. Startup checks the path and sidecars again immediately before opening it. Any orphaned sidecar, nonregular file, stat error, corrupt nonempty header, or future schema fails closed without creating or deleting database files.
 
 All schema changes, legacy-token migration, index creation, and the schema-version update run together in a `BEGIN IMMEDIATE` transaction. Re-running migration converges on schema version 2 without adding duplicate token records or indexes.
 

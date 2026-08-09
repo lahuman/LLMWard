@@ -159,3 +159,26 @@
   - `git diff --check` 통과, dependency와 `docs/audit/BASELINE.md` 변경 없음, scratch patch 없음
   - Docker CLI가 없어 runtime image/Compose 검증은 실행하지 않았고 unsupported 통과 주장을 하지 않는다.
   - 모든 test fixture는 temp directory와 temp SQLite만 사용했다. `.env`, 운영 `data/gateway.db`, 실제 secret/provider/log/backup을 읽거나 출력하지 않았다.
+
+## 체크포인트 6 — 최종 리뷰 수정 Round 4
+
+- 작업 기준:
+  - 시작 HEAD `2694db2fe962703b44407ddac0ee02e38133691d`, 코드·테스트 커밋 `f850e4919c426f212ae474b9bcf2af39187f757d`
+  - branch `audit/codex-hardening-release`, dependency와 `docs/audit/BASELINE.md` 변경 없음
+- 리뷰 발견 및 수정:
+  - main `DATABASE_PATH`가 없지만 orphaned `-wal`, `-shm`, `-journal` entry가 있으면 이전 startup은 새 main DB를 만들면서 sidecar를 삭제했다.
+  - missing/zero 신규 후보는 이제 sidecar 확인, main 재확인, 나타난 main의 기존 zero/nonempty/nonregular 검사, 여전히 missing이면 sidecar 즉시 재확인을 거친다. orphaned sidecar는 main이나 다른 sidecar를 만들거나 삭제하지 않고 generic/path/content-free 오류로 거부한다.
+- RED:
+  - orphaned-sidecar table 0/1, exit 1, TAP 273.6643 ms. 첫 `-wal` fixture에서 startup은 성공했고 새 main을 만들었으며 기존 sidecar를 삭제했다.
+- GREEN:
+  - orphaned-sidecar table 1/1, TAP 418.7393 ms
+  - sidecar-free missing 및 기존 zero-byte 경계 3/3, TAP 658.1445 ms
+  - migrations 15/15, TAP 2820.6636 ms; backup 15/15, TAP 4331.9254 ms; setup 2/2, TAP 584.7408 ms; operations 10/10, TAP 1348.886 ms; gateway 40/40, TAP 5916.8645 ms
+  - `npm.cmd test`: 83/83, exit 0, wall 9.320초, TAP 8673.4929 ms
+- 독립 review:
+  - 최종 판정 READY, 0 Critical, 0 Important, 1 non-blocking Minor. 구현과 실제 process test는 correct, fail-closed, privacy-preserving, minimal 판정을 받았다.
+  - re-lstat/final sidecar recheck 사이 race transition을 deterministic fs hook으로 mutation-cover하지 않은 Minor는 현재 correctness 결함이 아니다. 추가 hook abstraction은 현재 요구에 필요하지 않아 남겼다.
+- 불변조건과 제한:
+  - baseline/package/lock SHA-256은 체크포인트 5와 동일하고 `git diff --check`가 통과했다.
+  - Docker CLI가 없어 runtime Docker 검증은 실행하지 않았고 unsupported 통과 주장을 하지 않는다.
+  - 모든 fixture는 temp directory와 temp SQLite만 사용했다. `.env`, 운영 `data/gateway.db`, 실제 secret/provider/log/backup을 읽거나 출력하지 않았다.

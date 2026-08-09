@@ -11,6 +11,7 @@
 - Rejected future SQLite schemas without opening the real target through SQLite, covered uncheckpointed WAL state through a private copy, excluded SQLite and backup variants from Docker contexts, and constrained audit metadata to fixed families and fields.
 - Requested `0o600` backup creation on POSIX; Windows deployments require protected NTFS ACLs on data and backup storage, restricted to the Gateway service identity.
 - Kept private WAL schema-preflight copies under the protected database directory and allowed sidecar-free zero-byte database files to initialize without weakening corrupt or future-schema rejection.
+- Refused missing database paths with orphaned SQLite sidecars without creating a new main database or mutating any sidecar.
 
 ## 1.0.0 - 2026-08-04
 
