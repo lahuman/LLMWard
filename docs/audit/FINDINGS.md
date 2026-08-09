@@ -1,0 +1,21 @@
+# 감사 발견 사항
+
+이 표는 실제 코드 경로 또는 실행 결과로 확인된 항목만 포함한다. 수정 상태와 회귀 테스트는 작업 중 계속 갱신한다.
+
+| ID | 심각도 | 영역 | 문제 | 근거 | 영향 | 수정 상태 | 회귀 테스트 |
+| -- | --- | -- | -- | -- | -- | ----- | ------ |
+| LLW-001 | High | Streaming lifecycle | downstream backpressure 대기 중 client가 끊기면 `drain`만 기다려 종료되지 않을 수 있다. | `routes/v1.js`의 `res.write()` false 경로가 `drain` 이벤트만 대기한다. | upstream abort 후에도 요청 슬롯과 quota 예약이 남을 수 있다. | 수정 완료 | Task 4, `7cd465b`, `5a0dd1b`, `78b2011`; `test/gateway.test.js`의 `client disconnect aborts upstream and releases quota and concurrency`, `streaming backpressure aborts upstream and releases quota and concurrency`, `abortInFlight aborts active requests and cleanup is idempotent`; `test/server.test.js`의 `SIGTERM aborts held requests and exits cleanly before the force limit` |
+| LLW-002 | Medium | Provider URL / SSRF | Base URL이 query, fragment, 인코딩 경로 구분자 또는 traversal 형태를 거부·정규화하지 않고 문자열로 endpoint를 결합한다. | `routes/admin.js:247-257`, `services/provider-router.js`, `routes/v1.js` | 관리자가 의도한 endpoint와 다른 same-origin 경로 또는 잘못된 요청이 만들어질 수 있다. 관리자 인증으로 노출 범위는 제한된다. | 수정 완료 | Task 3, `451185a`, `2f7b377`; `test/gateway.test.js`의 `provider Base URLs reject query fragment traversal and encoded separators`, `provider Base URL updates reject unsafe forms without changing the stored canonical URL`, `provider Base URLs are canonical and fixed endpoints preserve the base path` |
+| LLW-003 | High | SQLite migration | 미래 `user_version`과 기존 foreign-key 위반을 확인하지 않고 schema version을 현재 값으로 기록한다. | `db/migrations.js`가 integrity만 검사하고 마지막에 무조건 `user_version = 2`를 실행한다. | 더 새로운 DB를 구버전 코드가 잘못 수용하거나 orphan 데이터를 가진 DB로 시작할 수 있다. | 수정 완료 | Task 1, `bc7d5de`, `00637d8`; `test/migrations.test.js`의 `future schema is rejected without mutation`, `foreign-key-invalid schema is rejected before mutation`, `post-migration integrity failure rolls back changes` |
+| LLW-004 | Medium | SQLite migration | legacy token 이동 뒤 서버 시작 경로에서 자동 `VACUUM`을 실행한다. | `db/migrations.js`의 legacy migration 후 `VACUUM` | 시작 지연과 장시간 write lock이 발생할 수 있다. | 수정 완료 | Task 1, `bc7d5de`, `00637d8`; `test/migrations.test.js`의 `orphaned legacy hash marker fails closed`, `legacy plaintext is absent from database and WAL after repeated migration`, `startup migration does not invoke VACUUM` |
+| LLW-005 | Medium | Quota accounting | UTC 날짜 경계를 넘긴 요청의 사용량이 예약 날짜가 아니라 완료 날짜에 기록된다. | `services/usage.js`가 reservation의 `request_date`를 읽지 않고 `utcDate()`를 다시 호출한다. | 날짜 경계에서 일일 쿼터 회계가 일관되지 않을 수 있다. | 수정 완료 | Task 2, `0f45181`; `test/gateway.test.js`의 `recordUsage applies tokens to the reservation UTC date` |
+| LLW-006 | Medium | Backup / recovery | 온라인 백업은 integrity만 확인하고 foreign-key, 실제 schema version, 독립 복원 검증 도구를 제공하지 않는다. | `services/backup.js`, `docs/BACKUP_RESTORE.md` | 손상되거나 호환되지 않는 백업을 정상으로 오판할 수 있다. | 수정 완료 | Task 5, `72c609c`, `8d5e988`, `3cef359`; `test/backup.test.js`의 `verifyDatabase rejects corrupt SQLite`, `verifyDatabase rejects foreign-key violations`, `verifyDatabase rejects non-current schema version`, `createBackup publishes only a fully verified artifact`, `verify-backup validates an independently copied restore without opening the live database` |
+| LLW-007 | Medium | Browser security | 관리자 화면과 API에 CSP, frame 방지, nosniff, referrer 및 민감 화면 no-store 정책이 없다. | `app.js`에 관련 응답 헤더 미설정 | 브라우저 기반 공격의 방어 심도가 부족하고 관리자 응답이 캐시될 수 있다. | 수정 완료 | Task 6, `7dd424a`, `dfa3a7c`; `test/gateway.test.js`의 `security headers and no-store protect browser and admin responses`, `dashboard uses CSP-compatible external assets and safe DOM rendering` |
+| LLW-008 | Medium | Operations / release | doctor 검사 범위가 좁고 CI가 없으며 Compose hardening이 적용되지 않았다. | `scripts/doctor.js`; `.github/` 부재; `docker-compose.yml` | 배포 전 설정 오류와 회귀를 자동으로 발견하기 어렵다. | 수정 완료 | Task 8, `c157059`, `0f48c65`; `test/operations.test.js`의 `doctor reports current database safety checks without exposing keys`, `CI uses read-only contents permission, Node 22, install, test, and production audit`, `container artifacts use Node 22 and a single hardened gateway service` |
+
+## 의도적으로 남는 위험
+
+- 사용량을 제공하지 않는 OpenAI-compatible 공급자의 토큰 사용량은 0으로 기록된다. 자체 tokenizer를 두지 않는 현재 제품 범위에서는 정확한 추정치를 만들지 않는다.
+- 공급자 자격증명을 DB에 직접 저장하면 로컬 SQLite에 평문으로 남는다. 환경 변수 참조가 권장 경로다.
+- TLS 종료와 네트워크 접근 제어는 배포 환경 책임이다.
+- 메모리 기반 RPM·동시성 상태는 프로세스 재시작 시 초기화된다.

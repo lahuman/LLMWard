@@ -1,0 +1,75 @@
+# 감사 작업 로그
+
+## 체크포인트 1 — 기준선 및 실행 경로 조사
+
+- 현재 단계: P0/P1 코드 감사 진행 중
+- 완료한 조사:
+  - Git 상태, 브랜치, 시작 HEAD 및 최근 이력 확인
+  - Git 추적 비밀·DB·로그·백업 패턴 확인
+  - package scripts와 의존성 확인
+  - 서버 시작, Express middleware, config, DB 연결·migration, 인증, 제한, quota, proxy, streaming, 관리자 API, setup/doctor/backup/benchmark, Docker와 기존 문서 조사
+- 실행한 명령:
+  - `git status --short`, `git branch --show-current`, `git rev-parse HEAD`, `git log -5 --oneline`
+  - `git ls-files` 비밀·DB 패턴 검사
+  - `node --version`, `npm.cmd --version`, `npm.cmd install`
+  - `npm.cmd test`, `npm.cmd audit --omit=dev`, `npm.cmd run doctor`, `npm.cmd run benchmark`
+  - `docker version`, `docker compose version`
+- 성공:
+  - 작업 브랜치 `audit/codex-hardening-release` 생성
+  - 테스트 28/28 통과
+  - production dependency audit 취약점 0건
+  - doctor와 benchmark 성공
+- 실패/환경 제한:
+  - `npm.ps1`은 Windows 실행 정책으로 차단되어 `npm.cmd` 사용
+  - Docker CLI가 없어 Docker 실행 검증 불가
+- 변경한 파일:
+  - `docs/audit/BASELINE.md`
+  - `docs/audit/FINDINGS.md`
+  - `docs/audit/WORKLOG.md`
+- 추가한 테스트: 아직 없음
+- 다음 작업:
+  - 병렬 감사 결과 통합
+  - LLW-001~008 재현 테스트 우선 작성
+  - 작은 단위로 구현 수정과 관련 테스트 실행
+- 중지 조건 발생 여부: 없음. 운영 DB와 실제 공급자는 테스트에 사용하지 않는다.
+
+## 체크포인트 2 — 감사 하드닝 및 1.0.1 릴리즈 검증
+
+- 작업 기준:
+  - 시작 HEAD `93e9ad6`, Task 9 기준 HEAD `0f48c6581a6bdb6f303e5954a371f088e5f176ff`
+  - 브랜치 `audit/codex-hardening-release`
+  - package와 lockfile root version `1.0.1`, Node engine `>=22`, 생성된 Git tag 없음
+- 항목별 구현 커밋:
+  - Task 1 / LLW-003·004: `bc7d5de`, `00637d8`
+  - Task 2 / LLW-005: `0f45181`
+  - Task 3 / LLW-002: `451185a`, `2f7b377`
+  - Task 4 / LLW-001: `7cd465b`, `5a0dd1b`, `78b2011`
+  - Task 5 / LLW-006: `72c609c`, `8d5e988`, `3cef359`
+  - Task 6 / LLW-007: `7dd424a`, `dfa3a7c`
+  - Task 7 / setup 안전성: `a9125f8`, `be508a1`
+  - Task 8 / LLW-008: `c157059`, `0f48c65`
+- Task 9 변경 전 focused suite:
+  - `node --test test/migrations.test.js`: 9/9, exit 0, wall 1.936초, TAP 1.782초
+  - `node --test test/backup.test.js`: 14/14, exit 0, wall 3.773초, TAP 3.660초
+  - `node --test test/setup.test.js`: 2/2, exit 0, wall 0.606초, TAP 0.478초
+  - `node --test test/server.test.js`: 1/1, exit 0, wall 3.867초, TAP 3.765초
+  - `node --test test/operations.test.js`: 9/9, exit 0, wall 1.559초, TAP 1.419초
+  - `node --test test/gateway.test.js`: 35/35, exit 0, wall 5.790초, TAP 5.676초
+- 릴리즈 matrix:
+  - `npm.cmd test`: 70/70, exit 0, wall 9.108초, TAP 8.485초
+  - generated administrator key, 명시적 temp `DATABASE_PATH`, current schema, test-only active provider/model로 `npm.cmd run doctor`: 16 PASS, exit 0, command 718 ms
+  - temp DB와 loopback mock provider만 사용하는 `npm.cmd run benchmark`: exit 0, wall 2.385초
+    - startup 396.01 ms, idle RSS 45.84 MiB, DB 126,976 bytes
+    - direct provider 평균 1.50 ms, gateway 평균 6.23 ms, 추가 평균 4.73 ms
+    - 1/10/100 사용자 simulation은 각각 1/10/100 성공, streaming 200 및 `[DONE]`, concurrency 결과 `[200, 429]`
+  - `npm.cmd audit --omit=dev`: exit 0, wall 1.996초, production dependency 취약점 0건
+  - generated administrator key와 명시적 temp DB에서 `npm.cmd run backup`: exit 0, 663 ms; 반환된 temp artifact를 `npm.cmd run verify-backup -- <temp-path>`로 검증: exit 0, 562 ms, integrity `ok`, schema 2
+  - startup health `node --test test/server.test.js`: 1/1, exit 0, wall 3.941초, TAP 3.819초
+  - `git diff --check`: exit 0, 0.086초; `.gitignore` LF→CRLF 안내만 출력
+- 환경 제한:
+  - Docker CLI unavailable; runtime image/Compose verification not executed.
+  - CI와 container 정의는 `test/operations.test.js`에서 Node 22, read-only contents 권한, production audit, 단일 non-root Gateway service, hardening 설정을 정적으로 검사했다.
+- 안전 범위:
+  - doctor와 backup은 생성한 temp 디렉터리와 명시적 `DATABASE_PATH`만 사용하고 종료 후 삭제했다.
+  - benchmark는 자체 temp DB와 loopback mock provider만 사용했다.
+  - 운영 `data/gateway.db`, `.env`, 실제 자격증명, 실제 공급자에는 접근하지 않았다.
