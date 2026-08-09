@@ -29,6 +29,7 @@ let inactiveProviderId;
 const providerCalls = new Map();
 const receivedMaximums = new Map();
 const receivedPayloads = new Map();
+const providerPaths = [];
 let upstreamDisconnects = 0;
 
 function listen(server) {
@@ -81,15 +82,16 @@ function chat(token, model, maxTokens) {
 
 before(async () => {
   providerServer = http.createServer(async (req, res) => {
+    providerPaths.push(req.url);
     if (req.url === '/redirect/models' || req.url === '/redirect/chat/completions') {
       res.writeHead(302, { Location: req.url.endsWith('/models') ? '/models' : '/chat/completions' });
       return res.end();
     }
-    if (req.url === '/models') {
+    if (req.url === '/models' || req.url === '/openai/v1/models') {
       res.writeHead(200, { 'Content-Type': 'application/json' });
       return res.end(JSON.stringify({ data: [{ id: 'discovered-model' }, { id: 'standard' }] }));
     }
-    if (req.url !== '/chat/completions' || req.method !== 'POST') {
+    if ((req.url !== '/chat/completions' && req.url !== '/openai/v1/chat/completions') || req.method !== 'POST') {
       res.writeHead(404); return res.end();
     }
     let raw = '';
@@ -429,6 +431,51 @@ test('admin input validation rejects unsafe values and references', async () => 
   const results = await Promise.all(cases);
   for (const result of results) assert.equal(result.status, 400);
   for (const result of results) assert.equal(result.body.error.includes('SQLITE'), false);
+});
+
+test('provider Base URLs reject query fragment traversal and encoded separators', async () => {
+  const unsafeUrls = [
+    `${providerBaseUrl}?mode=unsafe`,
+    `${providerBaseUrl}#fragment`,
+    `${providerBaseUrl}/../escape`,
+    `${providerBaseUrl}/%2e%2e/escape`,
+    `${providerBaseUrl}/openai%2fv1`,
+    `${providerBaseUrl}/openai%5cv1`
+  ];
+  for (const [index, base_url] of unsafeUrls.entries()) {
+    const response = await admin('/admin/providers', {
+      method: 'POST',
+      body: { provider_name: `unsafe-${index}`, display_name: 'Unsafe', base_url, auth_type: 'none' }
+    });
+    assert.equal(response.status, 400);
+  }
+});
+
+test('provider Base URLs are canonical and fixed endpoints preserve the base path', async () => {
+  const provider = await admin('/admin/providers', {
+    method: 'POST',
+    body: {
+      provider_name: 'base-path-provider',
+      display_name: 'Base Path',
+      base_url: `HTTP://127.0.0.1:${providerServer.address().port}/openai/v1/`,
+      auth_type: 'none'
+    }
+  });
+  assert.equal(provider.status, 201);
+  assert.equal(provider.body.base_url, `${providerBaseUrl}/openai/v1`);
+
+  const pathStart = providerPaths.length;
+  assert.equal((await admin(`/admin/providers/${provider.body.id}/discover-models`)).status, 200);
+  assert.equal((await admin('/admin/models', {
+    method: 'POST',
+    body: { model_name: 'base-path-model', display_name: 'Base Path', provider_id: provider.body.id }
+  })).status, 201);
+  const user = await createUser('base-path-user', ['base-path-model']);
+  assert.equal((await chat(user.token, 'base-path-model', 1)).status, 200);
+  assert.deepEqual(providerPaths.slice(pathStart), [
+    '/openai/v1/models',
+    '/openai/v1/chat/completions'
+  ]);
 });
 
 test('dashboard is UTF-8-safe JavaScript without unsafe rendering or persistent keys', () => {

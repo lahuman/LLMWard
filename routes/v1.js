@@ -3,7 +3,7 @@ const db = require('../db/database');
 const config = require('../config');
 const { validateToken } = require('../middleware/auth');
 const { reserveQuota, releaseReservation, recordUsage, recordFailure, getDailyUsage, utcDate } = require('../services/usage');
-const { getAuthHeaders, getActiveModelsWithProviders } = require('../services/provider-router');
+const { buildProviderEndpoint, getAuthHeaders, getActiveModelsWithProviders } = require('../services/provider-router');
 const { ApiError } = require('../services/errors');
 const { acquire } = require('../services/limits');
 
@@ -107,7 +107,7 @@ router.post('/chat/completions', validateToken, validateModelAccess, async (req,
     reservation = reserveQuota(req.user, req.body.max_tokens, req.gatewayModel.max_tokens);
     const payload = { ...req.body, max_tokens: reservation.maxTokens };
     timeout = setTimeout(() => controller.abort(), config.providerTimeout);
-    const response = await fetch(`${req.gatewayModel.base_url.replace(/\/$/, '')}/chat/completions`, {
+    const response = await fetch(buildProviderEndpoint(req.gatewayModel.base_url, 'chat/completions'), {
       method: 'POST',
       headers: getAuthHeaders(req.gatewayModel),
       body: JSON.stringify(payload),

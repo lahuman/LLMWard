@@ -3,7 +3,7 @@ const crypto = require('crypto');
 const path = require('path');
 const db = require('../db/database');
 const { validateAdmin } = require('../middleware/auth');
-const { testProvider, discoverModels, PROVIDER_PRESETS } = require('../services/provider-router');
+const { testProvider, discoverModels, normalizeProviderBaseUrl, PROVIDER_PRESETS } = require('../services/provider-router');
 const { ApiError } = require('../services/errors');
 const { hashToken } = require('../db/migrations');
 const { audit } = require('../services/audit');
@@ -245,16 +245,7 @@ function providerResponse(row) {
 }
 
 function validateUrl(value) {
-  const text = nonEmpty(value, 'base_url');
-  let url;
-  try { url = new URL(text); } catch { throw new ApiError(400, 'base_url must be a valid URL'); }
-  if (url.protocol !== 'http:' && url.protocol !== 'https:') {
-    throw new ApiError(400, 'base_url must use http or https');
-  }
-  if (url.username || url.password) {
-    throw new ApiError(400, 'base_url must not contain credentials');
-  }
-  return text.replace(/\/$/, '');
+  return normalizeProviderBaseUrl(nonEmpty(value, 'base_url'));
 }
 
 function authType(value) {

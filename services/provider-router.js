@@ -1,5 +1,33 @@
 const db = require('../db/database');
 const config = require('../config');
+const { ApiError } = require('./errors');
+const ENCODED_SEPARATOR = /%2f|%5c/i;
+const DOT_SEGMENT = /(?:^|\/)(?:(?:\.|%2e){1,2})(?:\/|$)/i;
+
+function normalizeProviderBaseUrl(value) {
+  const raw = String(value).trim();
+  if (ENCODED_SEPARATOR.test(raw) || DOT_SEGMENT.test(raw)) {
+    throw new ApiError(400, 'base_url contains an unsafe path', 'invalid_request');
+  }
+  let parsed;
+  try {
+    parsed = new URL(raw);
+  } catch {
+    throw new ApiError(400, 'base_url must be a valid URL', 'invalid_request');
+  }
+  if (!['http:', 'https:'].includes(parsed.protocol) || parsed.username || parsed.password ||
+      parsed.search || parsed.hash) {
+    throw new ApiError(400, 'base_url must be an HTTP(S) URL without credentials, query, or fragment', 'invalid_request');
+  }
+  parsed.pathname = parsed.pathname.replace(/\/+$/, '');
+  return parsed.href.replace(/\/$/, '');
+}
+
+function buildProviderEndpoint(baseUrl, relativePath) {
+  const endpoint = new URL(normalizeProviderBaseUrl(baseUrl));
+  endpoint.pathname = `${endpoint.pathname.replace(/\/+$/, '')}/${String(relativePath).replace(/^\/+/, '')}`;
+  return endpoint.href;
+}
 
 const PROVIDER_PRESETS = Object.freeze([
   { id: 'generic', name: 'Generic OpenAI-compatible', base_url: 'http://localhost:8000/v1', description: 'Any OpenAI-compatible HTTP server' },
@@ -50,7 +78,7 @@ async function testProvider(providerId) {
   let status = 'unhealthy';
   let result;
   try {
-    const response = await fetch(`${provider.base_url.replace(/\/$/, '')}/models`, {
+    const response = await fetch(buildProviderEndpoint(provider.base_url, 'models'), {
       headers: getAuthHeaders(provider),
       signal: AbortSignal.timeout(Math.min(config.providerTimeout, 10000)),
       redirect: 'manual'
@@ -76,7 +104,7 @@ async function testProvider(providerId) {
 async function discoverModels(providerId) {
   const provider = getProviderById(providerId);
   if (!provider || !provider.is_active) throw new Error('Provider is unavailable');
-  const response = await fetch(`${provider.base_url.replace(/\/$/, '')}/models`, {
+  const response = await fetch(buildProviderEndpoint(provider.base_url, 'models'), {
     headers: getAuthHeaders(provider),
     signal: AbortSignal.timeout(Math.min(config.providerTimeout, 10000)),
     redirect: 'manual'
@@ -109,5 +137,6 @@ function getActiveModelsWithProviders() {
 
 module.exports = {
   PROVIDER_PRESETS, discoverModels, getProviderById, getProviderForModel,
-  getAuthHeaders, testProvider, getActiveModelsWithProviders
+  getAuthHeaders, testProvider, getActiveModelsWithProviders,
+  normalizeProviderBaseUrl, buildProviderEndpoint
 };
