@@ -214,3 +214,140 @@ test('invalid backup artifact leaves no published file or success record', () =>
   );
   live.close();
 });
+
+test('backup initialization failure writes a sanitized failure audit', () => {
+  const livePath = fixturePath(path.join('mkdir-failure', 'live.db'));
+  createCurrentSchema(livePath);
+  const script = [
+    "const fs=require('node:fs')",
+    "const db=require('./db/database')",
+    "const originalMkdir=fs.mkdirSync",
+    "fs.mkdirSync=function(directory,options){if(directory.endsWith('backups'))throw new Error('mkdir-primary-marker');return originalMkdir.call(this,directory,options)}",
+    "require('./services/backup').createBackup().then(()=>{process.stderr.write('unexpected success');process.exitCode=1}).catch(error=>process.stdout.write(JSON.stringify({message:error.message,cleanupIncomplete:error.cleanupIncomplete===true,failureAuditFailed:error.failureAuditFailed===true}))).finally(()=>db.close())"
+  ].join(';');
+  const result = child(script, livePath);
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+  assert.deepEqual(JSON.parse(result.stdout), {
+    message: 'mkdir-primary-marker', cleanupIncomplete: false, failureAuditFailed: false
+  });
+  assert.equal(fs.existsSync(path.join(path.dirname(livePath), 'backups')), false);
+
+  const live = new Database(livePath, { readonly: true, fileMustExist: true });
+  const history = historyCount(live);
+  const successAudits = successAuditCount(live);
+  const failure = live.prepare(`
+    SELECT target_type, target_id, changed_fields FROM audit_logs
+    WHERE action = 'backup.create' AND success = 0
+  `).get();
+  live.close();
+
+  assert.equal(history, 0);
+  assert.equal(successAudits, 0);
+  assert.deepEqual(failure, { target_type: 'database', target_id: null, changed_fields: '[]' });
+  assert.equal(JSON.stringify(failure).includes('mkdir-primary-marker'), false);
+});
+
+test('post-publication failure reports incomplete exact-final cleanup without masking the primary error', () => {
+  const livePath = fixturePath(path.join('cleanup-failure', 'live.db'));
+  createCurrentSchema(livePath);
+  const script = [
+    "const fs=require('node:fs')",
+    "const path=require('node:path')",
+    "const db=require('./db/database')",
+    "const originalPrepare=db.prepare.bind(db)",
+    "db.prepare=function(sql){const statement=originalPrepare(sql);if(sql.includes('INSERT INTO audit_logs'))return{run(...args){if(args[3]===1)throw new Error('live-transaction-primary-marker');return statement.run(...args)}};return statement}",
+    "const originalUnlink=fs.unlinkSync",
+    "let cleanupAttempts=0",
+    "fs.unlinkSync=function(file){if(!path.basename(file).startsWith('.')&&file.endsWith('.db')){cleanupAttempts++;const error=new Error('cleanup-path-must-not-escape');error.code='EPERM';throw error}return originalUnlink.call(this,file)}",
+    "require('./services/backup').createBackup().then(()=>{process.stderr.write('unexpected success');process.exitCode=1}).catch(error=>process.stdout.write(JSON.stringify({message:error.message,cleanupIncomplete:error.cleanupIncomplete===true,failureAuditFailed:error.failureAuditFailed===true,cleanupAttempts}))).finally(()=>db.close())"
+  ].join(';');
+  const result = child(script, livePath);
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+  assert.deepEqual(JSON.parse(result.stdout), {
+    message: 'live-transaction-primary-marker',
+    cleanupIncomplete: true,
+    failureAuditFailed: false,
+    cleanupAttempts: 1
+  });
+
+  const backupDirectory = path.join(path.dirname(livePath), 'backups');
+  const remaining = fs.readdirSync(backupDirectory);
+  assert.equal(remaining.length, 1);
+  assert.equal(remaining[0].startsWith('gateway-'), true);
+  assert.deepEqual(verifyDatabase(path.join(backupDirectory, remaining[0])), { integrity: 'ok', schemaVersion: 2 });
+
+  const live = new Database(livePath, { readonly: true, fileMustExist: true });
+  assert.equal(historyCount(live), 0);
+  assert.equal(successAuditCount(live), 0);
+  assert.deepEqual(
+    live.prepare("SELECT changed_fields FROM audit_logs WHERE action = 'backup.create' AND success = 0").get(),
+    { changed_fields: '[\"cleanupIncomplete\"]' }
+  );
+  live.close();
+});
+
+test('failure-audit errors are reported without masking the post-publication primary error', () => {
+  const livePath = fixturePath(path.join('failure-audit-failure', 'live.db'));
+  createCurrentSchema(livePath);
+  const script = [
+    "const db=require('./db/database')",
+    "const originalPrepare=db.prepare.bind(db)",
+    "db.prepare=function(sql){const statement=originalPrepare(sql);if(sql.includes('INSERT INTO audit_logs'))return{run(...args){if(args[3]===1)throw new Error('live-transaction-primary-marker');throw new Error('failure-audit-secondary-marker')}};return statement}",
+    "require('./services/backup').createBackup().then(()=>{process.stderr.write('unexpected success');process.exitCode=1}).catch(error=>process.stdout.write(JSON.stringify({message:error.message,cleanupIncomplete:error.cleanupIncomplete===true,failureAuditFailed:error.failureAuditFailed===true}))).finally(()=>db.close())"
+  ].join(';');
+  const result = child(script, livePath);
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+  assert.deepEqual(JSON.parse(result.stdout), {
+    message: 'live-transaction-primary-marker', cleanupIncomplete: false, failureAuditFailed: true
+  });
+  assert.deepEqual(fs.readdirSync(path.join(path.dirname(livePath), 'backups')), []);
+
+  const live = new Database(livePath, { readonly: true, fileMustExist: true });
+  assert.equal(historyCount(live), 0);
+  assert.equal(successAuditCount(live), 0);
+  assert.equal(
+    live.prepare("SELECT COUNT(*) AS count FROM audit_logs WHERE action = 'backup.create'").get().count,
+    0
+  );
+  live.close();
+});
+
+test('backup publication never replaces an existing collision target', () => {
+  const livePath = fixturePath(path.join('collision', 'live.db'));
+  createCurrentSchema(livePath);
+  const finalUuid = '11111111-1111-4111-8111-111111111111';
+  const tempUuid = '22222222-2222-4222-8222-222222222222';
+  const fixedTime = '2026-01-02T03:04:05.678Z';
+  const filename = `gateway-2026-01-02T03-04-05-678Z-${finalUuid}.db`;
+  const backupDirectory = path.join(path.dirname(livePath), 'backups');
+  fs.mkdirSync(backupDirectory, { recursive: true });
+  const collisionPath = path.join(backupDirectory, filename);
+  fs.writeFileSync(collisionPath, 'collision-target-must-survive');
+
+  const script = [
+    "const fs=require('node:fs')",
+    "const crypto=require('node:crypto')",
+    "const db=require('./db/database')",
+    `const uuids=['${finalUuid}','${tempUuid}']`,
+    "crypto.randomUUID=()=>uuids.shift()",
+    `const fixedTime='${fixedTime}'`,
+    "const OriginalDate=Date",
+    "global.Date=class extends OriginalDate{constructor(...args){super(...(args.length?args:[fixedTime]))}static now(){return new OriginalDate(fixedTime).valueOf()}}",
+    "fs.renameSync=function(source,destination){fs.copyFileSync(source,destination);fs.unlinkSync(source)}",
+    "require('./services/backup').createBackup().then(result=>process.stdout.write(JSON.stringify({ok:true,result}))).catch(error=>process.stdout.write(JSON.stringify({ok:false,code:error.code}))).finally(()=>db.close())"
+  ].join(';');
+  const result = child(script, livePath);
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+  assert.deepEqual(JSON.parse(result.stdout), { ok: false, code: 'EEXIST' });
+  assert.equal(fs.readFileSync(collisionPath, 'utf8'), 'collision-target-must-survive');
+  assert.deepEqual(fs.readdirSync(backupDirectory), [filename]);
+
+  const live = new Database(livePath, { readonly: true, fileMustExist: true });
+  assert.equal(historyCount(live), 0);
+  assert.equal(successAuditCount(live), 0);
+  assert.equal(
+    live.prepare("SELECT COUNT(*) AS count FROM audit_logs WHERE action = 'backup.create' AND success = 0").get().count,
+    1
+  );
+  live.close();
+});

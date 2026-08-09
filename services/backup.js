@@ -16,17 +16,20 @@ function recordHistory(database, filename, createdAt) {
 }
 
 async function createBackup() {
-  if (config.databasePath === ':memory:') throw new Error('In-memory databases cannot be backed up');
-  const directory = path.join(path.dirname(config.databasePath), 'backups');
-  fs.mkdirSync(directory, { recursive: true });
-  const createdAt = new Date().toISOString();
-  const attemptId = crypto.randomUUID();
-  const filename = `gateway-${createdAt.replace(/[:.]/g, '-')}-${attemptId}.db`;
-  const destination = path.join(directory, filename);
-  const temporaryPath = path.join(directory, `.${filename}.${crypto.randomUUID()}.tmp`);
+  let temporaryPath;
+  let destination;
   let ownsTemporary = false;
-  let published = false;
+  let ownsDestination = false;
   try {
+    if (config.databasePath === ':memory:') throw new Error('In-memory databases cannot be backed up');
+    const directory = path.join(path.dirname(config.databasePath), 'backups');
+    fs.mkdirSync(directory, { recursive: true });
+    const createdAt = new Date().toISOString();
+    const attemptId = crypto.randomUUID();
+    const filename = `gateway-${createdAt.replace(/[:.]/g, '-')}-${attemptId}.db`;
+    destination = path.join(directory, filename);
+    temporaryPath = path.join(directory, `.${filename}.${crypto.randomUUID()}.tmp`);
+
     let descriptor;
     try {
       descriptor = fs.openSync(temporaryPath, 'wx');
@@ -58,9 +61,10 @@ async function createBackup() {
     }
 
     const verification = verifyDatabase(temporaryPath);
-    fs.renameSync(temporaryPath, destination);
+    fs.linkSync(temporaryPath, destination);
+    ownsDestination = true;
+    fs.unlinkSync(temporaryPath);
     ownsTemporary = false;
-    published = true;
 
     db.transaction(() => {
       recordHistory(db, filename, createdAt);
@@ -74,15 +78,27 @@ async function createBackup() {
       integrity: verification.integrity
     };
   } catch (error) {
-    if (ownsTemporary) {
-      for (const ownedFile of [temporaryPath, `${temporaryPath}-wal`, `${temporaryPath}-shm`]) {
-        try { fs.unlinkSync(ownedFile); } catch {}
+    const ownedFiles = [];
+    if (ownsTemporary && temporaryPath) {
+      ownedFiles.push(temporaryPath, `${temporaryPath}-wal`, `${temporaryPath}-shm`);
+    }
+    if (ownsDestination && destination) ownedFiles.push(destination);
+
+    let cleanupIncomplete = false;
+    for (const ownedFile of ownedFiles) {
+      try {
+        fs.unlinkSync(ownedFile);
+      } catch (cleanupError) {
+        if (cleanupError.code !== 'ENOENT') cleanupIncomplete = true;
       }
     }
-    if (published) {
-      try { fs.unlinkSync(destination); } catch {}
+    if (cleanupIncomplete) error.cleanupIncomplete = true;
+
+    try {
+      audit('backup.create', 'database', null, false, cleanupIncomplete ? ['cleanupIncomplete'] : []);
+    } catch {
+      error.failureAuditFailed = true;
     }
-    try { audit('backup.create', 'database', null, false, []); } catch {}
     throw error;
   }
 }
