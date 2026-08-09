@@ -147,15 +147,24 @@ test('future schema is rejected without mutation', () => {
   const file = databasePath('future');
   const database = open(file);
   database.exec('CREATE TABLE sentinel (id INTEGER PRIMARY KEY, value TEXT NOT NULL); INSERT INTO sentinel VALUES (1, \'keep\'); PRAGMA user_version = 3;');
+  assert.equal(database.pragma('journal_mode', { simple: true }), 'delete');
   database.close();
+  const bytesBefore = fs.readFileSync(file);
+  const hashBefore = crypto.createHash('sha256').update(bytesBefore).digest('hex');
 
   const result = migrate(file);
   assert.notEqual(result.status, 0);
   const checked = open(file, { readonly: true });
   assert.equal(checked.pragma('user_version', { simple: true }), 3);
+  assert.equal(checked.pragma('journal_mode', { simple: true }), 'delete');
   assert.equal(checked.prepare('SELECT value FROM sentinel WHERE id = 1').pluck().get(), 'keep');
   assert.equal(checked.prepare("SELECT COUNT(*) AS count FROM sqlite_master WHERE type = 'table' AND name = 'users'").get().count, 0);
   checked.close();
+  const bytesAfter = fs.readFileSync(file);
+  assert.deepEqual(bytesAfter, bytesBefore);
+  assert.equal(crypto.createHash('sha256').update(bytesAfter).digest('hex'), hashBefore);
+  assert.equal(fs.existsSync(`${file}-wal`), false);
+  assert.equal(fs.existsSync(`${file}-shm`), false);
 });
 
 test('foreign-key-invalid schema is rejected before mutation', () => {

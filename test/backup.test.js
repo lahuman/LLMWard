@@ -133,6 +133,29 @@ test('createBackup publishes only a fully verified artifact', () => {
   live.close();
 });
 
+test('createBackup requests owner-only permissions for its artifact', () => {
+  const livePath = fixturePath(path.join('owner-only', 'live.db'));
+  createCurrentSchema(livePath);
+  const script = [
+    "const fs=require('node:fs')",
+    "const path=require('node:path')",
+    "const db=require('./db/database')",
+    "const originalOpen=fs.openSync",
+    "let observedMode",
+    "fs.openSync=function(file,flags,mode){if(flags==='wx'&&path.basename(file).startsWith('.'))observedMode=mode;return originalOpen.call(this,file,flags,mode)}",
+    "require('./services/backup').createBackup().then(result=>process.stdout.write(JSON.stringify({filename:result.filename,observedMode}))).catch(error=>{process.stderr.write(error.message);process.exitCode=1}).finally(()=>db.close())"
+  ].join(';');
+  const result = child(script, livePath);
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+  const observed = JSON.parse(result.stdout);
+  assert.equal(observed.observedMode, 0o600);
+
+  if (process.platform !== 'win32') {
+    const backupPath = path.join(path.dirname(livePath), 'backups', observed.filename);
+    assert.equal(fs.statSync(backupPath).mode & 0o077, 0);
+  }
+});
+
 test('verify-backup validates an independently copied restore without opening the live database', () => {
   const livePath = fixturePath(path.join('restore-source', 'live.db'));
   createCurrentSchema(livePath);

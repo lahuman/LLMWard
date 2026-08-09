@@ -14,6 +14,32 @@ const router = express.Router();
 const IDENTIFIER = /^[a-z0-9][a-z0-9_.-]{0,127}$/;
 const MODEL_IDENTIFIER = /^[a-z0-9][a-z0-9_.:/-]{0,199}$/;
 const AUTH_TYPES = new Set(['none', 'api_key', 'bearer_token']);
+const USER_UPDATE_AUDIT_FIELDS = [
+  'max_daily_input_tokens', 'max_daily_output_tokens', 'max_requests_per_minute',
+  'max_concurrent_requests', 'is_active', 'allowed_models'
+];
+const MODEL_CREATE_AUDIT_FIELDS = [
+  'model_name', 'display_name', 'model_type', 'provider_id', 'max_tokens',
+  'max_concurrent_requests', 'input_cost_per_million', 'output_cost_per_million'
+];
+const MODEL_UPDATE_AUDIT_FIELDS = [...MODEL_CREATE_AUDIT_FIELDS, 'is_active'];
+const PROVIDER_CREATE_AUDIT_FIELDS = [
+  'provider_name', 'display_name', 'base_url', 'auth_type', 'api_key_env_name',
+  'stored_api_key', 'max_concurrent_requests'
+];
+const PROVIDER_UPDATE_AUDIT_FIELDS = [...PROVIDER_CREATE_AUDIT_FIELDS, 'is_active'];
+
+function auditChangedFields(body, supportedFields) {
+  return supportedFields.filter((field) => Object.hasOwn(body, field));
+}
+
+function auditTargetId(value) {
+  if (typeof value !== 'string' && typeof value !== 'number') return null;
+  const canonical = String(value);
+  if (!/^[1-9]\d*$/.test(canonical)) return null;
+  const parsed = Number(canonical);
+  return Number.isSafeInteger(parsed) ? parsed : null;
+}
 
 function positive(value, name) {
   if (!Number.isSafeInteger(value) || value <= 0) throw new ApiError(400, `${name} must be a positive safe integer`);
@@ -258,6 +284,11 @@ function authType(value) {
 router.get('/', (req, res) => res.sendFile(path.join(__dirname, '..', 'public', 'admin-dashboard.html')));
 router.use(validateAdmin);
 router.use((req, res, next) => {
+  const segments = req.path.split('/').filter(Boolean);
+  res.locals.auditTargetId = auditTargetId(segments[1]);
+  next();
+});
+router.use((req, res, next) => {
   if (req.method !== 'POST' && req.method !== 'PUT') return next();
   if (req.body === undefined) req.body = {};
   if (req.body === null || typeof req.body !== 'object' || Array.isArray(req.body)) {
@@ -332,16 +363,17 @@ router.put('/users/:id', (req, res, next) => {
     if (!fields.length) throw new ApiError(400, 'No supported fields were provided');
     const result = db.prepare(`UPDATE users SET ${fields.join(', ')} WHERE id = ?`).run(...values, userId);
     if (!result.changes) throw new ApiError(404, 'User not found');
-    audit('user.update', 'user', userId, true, Object.keys(req.body));
+    audit('user.update', 'user', userId, true, auditChangedFields(req.body, USER_UPDATE_AUDIT_FIELDS));
     res.json(userResponse(userById(userId)));
   } catch (error) { next(error); }
 });
 
 router.delete('/users/:id', (req, res, next) => {
   try {
-    const result = db.prepare('UPDATE users SET is_active = 0 WHERE id = ?').run(id(req.params.id, 'user id'));
+    const userId = id(req.params.id, 'user id');
+    const result = db.prepare('UPDATE users SET is_active = 0 WHERE id = ?').run(userId);
     if (!result.changes) throw new ApiError(404, 'User not found');
-    audit('user.deactivate', 'user', req.params.id, true, ['is_active']);
+    audit('user.deactivate', 'user', userId, true, ['is_active']);
     res.json({ message: 'User deactivated' });
   } catch (error) { next(error); }
 });
@@ -435,9 +467,10 @@ router.post('/models', (req, res, next) => {
          max_concurrent_requests, input_cost_per_million, output_cost_per_million, created_at)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(modelName, displayName, modelType, providerId, maxTokens, maxConcurrent, inputPrice, outputPrice, new Date().toISOString());
-    audit('model.create', 'model', result.lastInsertRowid, true, Object.keys(req.body));
+    const modelId = Number(result.lastInsertRowid);
+    audit('model.create', 'model', modelId, true, auditChangedFields(req.body, MODEL_CREATE_AUDIT_FIELDS));
     res.status(201).json({
-      id: Number(result.lastInsertRowid), model_name: modelName, display_name: displayName,
+      id: modelId, model_name: modelName, display_name: displayName,
       model_type: modelType, provider_id: providerId, max_tokens: maxTokens,
       max_concurrent_requests: maxConcurrent,
       input_cost_per_million: inputPrice, output_cost_per_million: outputPrice, is_active: true
@@ -498,7 +531,7 @@ router.put('/models/:id', (req, res, next) => {
              max_concurrent_requests, input_cost_per_million, output_cost_per_million, is_active, created_at
       FROM models WHERE id = ?
     `).get(modelId);
-    audit('model.update', 'model', modelId, true, Object.keys(req.body));
+    audit('model.update', 'model', modelId, true, auditChangedFields(req.body, MODEL_UPDATE_AUDIT_FIELDS));
     res.json({ ...row, is_active: Boolean(row.is_active), created_at: iso(row.created_at) });
   } catch (error) { next(error); }
 });
@@ -546,8 +579,9 @@ router.post('/providers', (req, res, next) => {
         (provider_name, display_name, base_url, auth_type, api_key_env_name, stored_api_key, max_concurrent_requests, created_at)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?)
     `).run(name, displayName, baseUrl, type, envName, storedKey, maxConcurrent, new Date().toISOString());
-    audit('provider.create', 'provider', result.lastInsertRowid, true, Object.keys(req.body));
-    const row = db.prepare(`${providerSelect} WHERE id = ?`).get(result.lastInsertRowid);
+    const providerId = Number(result.lastInsertRowid);
+    audit('provider.create', 'provider', providerId, true, auditChangedFields(req.body, PROVIDER_CREATE_AUDIT_FIELDS));
+    const row = db.prepare(`${providerSelect} WHERE id = ?`).get(providerId);
     res.status(201).json(providerResponse(row));
   } catch (error) { next(error); }
 });
@@ -576,7 +610,7 @@ router.put('/providers/:id', (req, res, next) => {
     if (!fields.length) throw new ApiError(400, 'No supported fields were provided');
     const result = db.prepare(`UPDATE providers SET ${fields.join(', ')} WHERE id = ?`).run(...values, providerId);
     if (!result.changes) throw new ApiError(404, 'Provider not found');
-    audit('provider.update', 'provider', providerId, true, Object.keys(req.body));
+    audit('provider.update', 'provider', providerId, true, auditChangedFields(req.body, PROVIDER_UPDATE_AUDIT_FIELDS));
     res.json(providerResponse(db.prepare(`${providerSelect} WHERE id = ?`).get(providerId)));
   } catch (error) { next(error); }
 });
@@ -773,8 +807,7 @@ router.use((error, req, res, next) => {
   if (req.method === 'POST' || req.method === 'PUT' || req.method === 'DELETE') {
     try {
       const targetType = req.path.split('/').filter(Boolean)[0] || 'admin';
-      const targetId = req.params && (req.params.id || req.params.userId || req.params.tokenId);
-      audit(`${targetType}.change`, targetType, targetId, false, req.body && typeof req.body === 'object' ? Object.keys(req.body) : []);
+      audit(`${targetType}.change`, targetType, res.locals.auditTargetId ?? null, false, []);
     } catch {}
   }
   next(error);

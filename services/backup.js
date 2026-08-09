@@ -32,7 +32,7 @@ async function createBackup() {
 
     let descriptor;
     try {
-      descriptor = fs.openSync(temporaryPath, 'wx');
+      descriptor = fs.openSync(temporaryPath, 'wx', 0o600);
       ownsTemporary = true;
     } finally {
       if (descriptor !== undefined) fs.closeSync(descriptor);

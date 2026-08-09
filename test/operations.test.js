@@ -249,3 +249,25 @@ test('container artifacts use Node 22 and a single hardened gateway service', ()
   assert.match(compose, /^\s+security_opt:\s*\r?\n\s+- no-new-privileges:true\s*$/m);
   assert.doesNotMatch(compose, /^\s+(read_only|tmpfs):/m);
 });
+
+test('Docker build context excludes secrets, runtime data, and local artifacts', () => {
+  const dockerfile = fs.readFileSync(path.join(repositoryRoot, 'Dockerfile'), 'utf8');
+  assert.equal((dockerfile.match(/^COPY \. \.\s*$/gm) || []).length, 1);
+
+  const ignored = new Set(fs.readFileSync(path.join(repositoryRoot, '.dockerignore'), 'utf8')
+    .split(/\r?\n/)
+    .map((entry) => entry.trim())
+    .filter((entry) => entry && !entry.startsWith('#')));
+  for (const entry of [
+    'node_modules', '.git', 'data', '.env', '.env.*',
+    'coverage', '.nyc_output', '*.db', '*.db-wal', '*.db-shm', 'backups',
+    '*.log', '*.out', '*.err', 'npm-debug.log*',
+    '.agents', '.codex', '.superpowers', '.idea', '.vscode',
+    '**/node_modules', '**/.git', '**/data', '**/.env', '**/.env.*',
+    '**/coverage', '**/.nyc_output', '**/*.db', '**/*.db-wal', '**/*.db-shm',
+    '**/backups', '**/*.log', '**/*.out', '**/*.err', '**/npm-debug.log*',
+    '**/.agents', '**/.codex', '**/.superpowers', '**/.idea', '**/.vscode'
+  ]) {
+    assert.equal(ignored.has(entry), true, `.dockerignore must exclude ${entry}`);
+  }
+});

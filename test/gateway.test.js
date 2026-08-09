@@ -316,6 +316,66 @@ test('user creation authenticates and user lists never disclose tokens', async (
   assert.equal(Object.hasOwn(users.body[0], 'api_token'), false);
 });
 
+test('successful admin audits keep only fixed supported field names', async () => {
+  const user = await createUser('audit-success-user', ['standard']);
+  const marker = `prompt_${crypto.randomBytes(12).toString('hex')}`;
+  const response = await admin(`/admin/users/${user.id}`, {
+    method: 'PUT',
+    body: { max_daily_input_tokens: 321, [marker]: 'ignored' }
+  });
+  assert.equal(response.status, 200);
+
+  const row = db.prepare(`
+    SELECT target_id, changed_fields FROM audit_logs
+    WHERE action = 'user.update' AND target_id = ? ORDER BY id DESC LIMIT 1
+  `).get(String(user.id));
+  const fields = JSON.parse(row.changed_fields);
+  assert.equal(fields.includes(marker), false);
+  assert.equal(fields.length, 1);
+  assert.equal(fields[0], 'max_daily_input_tokens');
+  assert.equal(row.target_id, String(user.id));
+});
+
+test('failed admin audits discard request field names and malformed target IDs', async () => {
+  const fieldMarker = `secret_${crypto.randomBytes(12).toString('hex')}`;
+  const routeMarker = `invalid-${crypto.randomBytes(12).toString('hex')}`;
+  const previousId = db.prepare('SELECT COALESCE(MAX(id), 0) AS id FROM audit_logs').get().id;
+  const response = await admin(`/admin/users/${routeMarker}`, {
+    method: 'PUT', body: { [fieldMarker]: 'ignored' }
+  });
+  assert.equal(response.status, 400);
+
+  const row = db.prepare(`
+    SELECT target_id, changed_fields FROM audit_logs
+    WHERE id > ? AND success = 0 ORDER BY id DESC LIMIT 1
+  `).get(previousId);
+  assert.ok(row);
+  const serialized = JSON.stringify(row);
+  assert.equal(serialized.includes(fieldMarker), false);
+  assert.equal(serialized.includes(routeMarker), false);
+  assert.equal(row.target_id, null);
+  assert.deepEqual(JSON.parse(row.changed_fields), []);
+});
+
+test('failed admin audits retain canonical target IDs', async () => {
+  const user = await createUser('audit-failure-user', ['standard']);
+  const marker = `secret_${crypto.randomBytes(12).toString('hex')}`;
+  const previousId = db.prepare('SELECT COALESCE(MAX(id), 0) AS id FROM audit_logs').get().id;
+  const response = await admin(`/admin/users/${user.id}`, {
+    method: 'PUT', body: { [marker]: 'ignored' }
+  });
+  assert.equal(response.status, 400);
+
+  const row = db.prepare(`
+    SELECT target_id, changed_fields FROM audit_logs
+    WHERE id > ? AND success = 0 ORDER BY id DESC LIMIT 1
+  `).get(previousId);
+  assert.ok(row);
+  assert.equal(row.changed_fields.includes(marker), false);
+  assert.equal(row.target_id, String(user.id));
+  assert.deepEqual(JSON.parse(row.changed_fields), []);
+});
+
 test('token rotation invalidates the old token immediately', async () => {
   const user = await createUser('rotation-user', ['standard']);
   const rotated = await admin(`/admin/users/${user.id}/rotate-token`, { method: 'POST' });
