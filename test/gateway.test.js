@@ -294,6 +294,27 @@ test('concurrent requests cannot oversubscribe output quota', async () => {
   assert.equal((await chat(user.token, 'concurrent', 1)).status, 429);
 });
 
+test('recordUsage applies tokens to the reservation UTC date', async () => {
+  const user = await createUser('reservation-date-user', ['standard']);
+  const model = db.prepare("SELECT * FROM models WHERE model_name = 'standard'").get();
+  const { reserveQuota, recordUsage } = require('../services/usage');
+  const reservation = reserveQuota(
+    db.prepare('SELECT * FROM users WHERE id = ?').get(user.id),
+    2,
+    model.max_tokens
+  );
+  const reservedDate = '2001-02-03';
+  db.prepare('UPDATE quota_reservations SET request_date = ? WHERE request_id = ?')
+    .run(reservedDate, reservation.requestId);
+  recordUsage(reservation.requestId, user.id, model, 2, 1, 5);
+  const fixed = db.prepare('SELECT * FROM usage_logs WHERE user_id = ? AND request_date = ?')
+    .get(user.id, reservedDate);
+  assert.equal(fixed.input_tokens, 2);
+  assert.equal(fixed.output_tokens, 1);
+  assert.equal(db.prepare('SELECT COUNT(*) AS count FROM quota_reservations WHERE request_id = ?')
+    .get(reservation.requestId).count, 0);
+});
+
 test('usage summary and request log are atomic', async () => {
   const user = await createUser('atomic-user', ['atomic-fail'], 20, 20);
   db.exec(`
