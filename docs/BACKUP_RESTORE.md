@@ -12,6 +12,8 @@ Windows의 Node.js file mode는 NTFS ACL을 설정하지 않습니다. Windows �
 - `data/backups`와 별도 backup 보관 위치
 - 복원 검증에 사용하는 staging 위치
 
+스키마 사전 검사용 private main/WAL 복사본도 data 디렉터리 바로 아래의 고유한 `.llmward-schema-preflight-*` 디렉터리에 생성되어 같은 ACL을 상속합니다. cleanup failure 뒤 남은 복사본은 Gateway를 중지하고 정확한 생성 디렉터리만 확인해 제거하십시오.
+
 이는 배포 환경의 책임이며, 적용하지 않으면 같은 host의 다른 계정이 공급자 자격증명과 token hash를 포함한 DB 또는 backup을 읽을 수 있습니다. 서비스 계정, 상속 정책, 운영 복구 계정이 배포마다 다르므로 이 문서는 일률적인 ACL 초기화·교체 명령을 제공하지 않습니다. 조직의 배포 도구로 최소 권한 ACL을 적용하고 검증하십시오.
 
 백업을 운영 중인 DB에 바로 덮어쓰거나 운영 DB 자체를 검증 대상으로 사용하지 마십시오. 백업 파일을 별도 경로에 복사한 독립적인 복구 복사본만 검증합니다.

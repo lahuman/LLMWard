@@ -133,3 +133,29 @@
   - Docker CLI가 없어 runtime image/Compose 검증은 실행하지 않았다. 대표 build-context 경로를 정적으로 검증했다.
   - 모든 fixture는 temp directory, temp SQLite, loopback mock provider만 사용했다. `.env`, 운영 `data/gateway.db`, 실제 secret/provider/log/backup을 읽거나 출력하지 않았다.
   - Windows ACL은 제품이 자동 변경하지 않는다. deployment가 Gateway 서비스 계정의 effective access를 확인해야 한다.
+
+## 체크포인트 5 — 최종 리뷰 수정 Round 3
+
+- 작업 기준:
+  - 시작 HEAD `8d35951008204ad95538332838a3e55c57c76832`, 코드·테스트 커밋 `907d379a4e8ae5ac1f4f6ad73ec735f8afa0af2c`
+  - branch `audit/codex-hardening-release`, package/lockfile version `1.0.1`, dependency 변경과 생성된 HEAD tag 없음
+- 리뷰 발견 및 수정:
+  - Windows에서 private main/WAL copy가 `os.tmpdir()` ACL을 상속하던 경로를 설정된 DB 부모의 고유한 `.llmward-schema-preflight-*` 직접 자식으로 옮겼다. POSIX `0700`/`0600`, main+WAL-only copy, target 불변성, 정확한 cleanup, 일반·path-free failure와 writable schema 재검사는 유지했다.
+  - 기존 0-byte regular DB는 `-wal`, `-shm`, `-journal`이 모두 없을 때만 신규 DB로 허용한다. sidecar와 main file type/size를 다시 확인하고, sidecar 존재·비정규 파일·stat 오류는 fail closed한다. nonempty corrupt/future-header 거부는 유지했다.
+- RED:
+  - protected-parent cleanup focused: 0/1, exit 1, TAP 361.9035 ms. private directory가 DB 부모의 직접 자식이 아니어서 실패했다.
+  - existing zero-byte focused: 0/1, exit 1, TAP 230.505 ms. `readDatabaseHeader()`의 100-byte header 검사에서 generic preflight failure로 거부됐다.
+  - zero-byte sidecar 표는 기존 구현에서도 1/1 fail-closed였으며, 신규 예외가 `-wal`/`-shm`/`-journal` 경계를 열지 않는 characterization guard로 유지했다.
+- GREEN:
+  - protected-parent cleanup 1/1, TAP 349.8444 ms; zero-byte startup 1/1, TAP 275.9347 ms; zero-byte sidecar 1/1, TAP 399.708 ms
+  - migrations 14/14, TAP 2662.1164 ms; backup 15/15, TAP 4310.7174 ms; setup 2/2, TAP 479.2891 ms; operations 10/10, TAP 1385.0072 ms; gateway 40/40, TAP 5603.2544 ms
+  - 최종 `npm.cmd test`: 82/82, exit 0, wall 10.047초, TAP 9435.1436 ms
+- 독립 review:
+  - 최종 판정 READY, 0 Critical, 0 Important, 1 non-blocking Minor. 구현은 direct-parent ACL inheritance, lstat fail-closed sidecar semantics, exact cleanup과 generic error 요구를 충족했다.
+  - nonregular/stat-error 및 검사 사이 mutation 경로를 직접 fault-injection하지 않은 Minor는 현재 correctness 결함이 아니다. 해당 동작은 구현되어 있고 추가 test hook 추상화가 현재 요구에 필요하지 않아 남겼다.
+  - reviewer의 fresh migrations 14/14와 scoped `git diff --check`도 통과했다.
+- 불변조건과 제한:
+  - `docs/audit/BASELINE.md` SHA-256은 `C8E152CA33D4B5A00C54E6890AEC14344120776543DBEF4A8521BEE74D67E412`; package SHA-256은 `6597E7762BB01DA9CA96BA71FE9BA8987C3EF64627B569FC7C2FCFF7060DEA01`; lockfile SHA-256은 `E76A5B15748E52BEB2E645F2CEBD7A2109031C52B56875D486F85A0520B1DDFA`
+  - `git diff --check` 통과, dependency와 `docs/audit/BASELINE.md` 변경 없음, scratch patch 없음
+  - Docker CLI가 없어 runtime image/Compose 검증은 실행하지 않았고 unsupported 통과 주장을 하지 않는다.
+  - 모든 test fixture는 temp directory와 temp SQLite만 사용했다. `.env`, 운영 `data/gateway.db`, 실제 secret/provider/log/backup을 읽거나 출력하지 않았다.
