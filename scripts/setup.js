@@ -21,8 +21,15 @@ if (!fs.existsSync(envPath)) {
     `ADMIN_SECRET_KEY=${generatedKey}`
   );
   const temporaryPath = path.join(root, `.env.${process.pid}.${crypto.randomBytes(6).toString('hex')}.tmp`);
+  let ownsTemporaryPath = false;
   try {
-    fs.writeFileSync(temporaryPath, contents, { encoding: 'utf8', flag: 'wx', mode: 0o600 });
+    const temporaryFile = fs.openSync(temporaryPath, 'wx', 0o600);
+    ownsTemporaryPath = true;
+    try {
+      fs.writeFileSync(temporaryFile, contents, 'utf8');
+    } finally {
+      fs.closeSync(temporaryFile);
+    }
     try {
       fs.linkSync(temporaryPath, envPath);
       created = true;
@@ -31,7 +38,13 @@ if (!fs.existsSync(envPath)) {
       generatedKey = undefined;
     }
   } finally {
-    if (fs.existsSync(temporaryPath)) fs.unlinkSync(temporaryPath);
+    if (ownsTemporaryPath) {
+      try {
+        fs.unlinkSync(temporaryPath);
+      } catch (error) {
+        if (error.code !== 'ENOENT') throw error;
+      }
+    }
   }
 }
 
