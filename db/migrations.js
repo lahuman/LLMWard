@@ -280,6 +280,10 @@ function runMigrations() {
       CREATE INDEX IF NOT EXISTS idx_user_tokens_active_hash ON user_tokens(token_hash, is_active);
       CREATE INDEX IF NOT EXISTS idx_audit_logs_created_at ON audit_logs(created_at);
       `);
+      const postMigrationIntegrity = db.pragma('integrity_check')[0].integrity_check;
+      if (postMigrationIntegrity !== 'ok') {
+        throw new Error('Database integrity check failed after migrations');
+      }
       assertForeignKeys('after');
       db.pragma(`user_version = ${SCHEMA_VERSION}`);
     }).immediate();

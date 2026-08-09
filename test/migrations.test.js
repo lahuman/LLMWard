@@ -16,9 +16,14 @@ function databasePath(name) {
   return path.join(temporaryDirectory, `${name}.db`);
 }
 
-function migrate(file, forbidVacuum = false) {
-  const script = forbidVacuum
-    ? "const Database=require('better-sqlite3');const exec=Database.prototype.exec;Database.prototype.exec=function(sql){if(/\\bVACUUM\\b/i.test(sql))throw new Error('VACUUM invoked');return exec.call(this,sql)};const {runMigrations}=require('./db/migrations');runMigrations();require('./db/database').close()"
+function migrate(file, options = {}) {
+  const { forbidVacuum = false, failPostIntegrityCheck = false } = options;
+  const observers = [
+    forbidVacuum && "const exec=Database.prototype.exec;Database.prototype.exec=function(sql){if(/\\bVACUUM\\b/i.test(sql))throw new Error('VACUUM invoked');return exec.call(this,sql)};",
+    failPostIntegrityCheck && "const pragma=Database.prototype.pragma;let integrityChecks=0;Database.prototype.pragma=function(sql,options){if(sql==='integrity_check'&&++integrityChecks===2)return [{integrity_check:'corrupt'}];return pragma.call(this,sql,options)};"
+  ].filter(Boolean).join('');
+  const script = observers
+    ? `const Database=require('better-sqlite3');${observers}const {runMigrations}=require('./db/migrations');runMigrations();require('./db/database').close()`
     : "const {runMigrations}=require('./db/migrations');runMigrations();require('./db/database').close()";
   return spawnSync(process.execPath, ['-e', script], {
     cwd: root,
@@ -26,7 +31,6 @@ function migrate(file, forbidVacuum = false) {
     env: { ...process.env, DATABASE_PATH: file, ADMIN_SECRET_KEY: adminKey, LOG_LEVEL: 'silent' }
   });
 }
-
 function open(file, options) {
   const database = new Database(file, options);
   openDatabases.add(database);
@@ -118,10 +122,27 @@ test('migration is repeatable on an already-current database', () => {
   assert.equal(database.prepare('SELECT COUNT(*) AS count FROM user_tokens').get().count, 1);
   assert.equal(database.prepare('SELECT api_token FROM users WHERE username = ?').pluck().get('repeatable-user'),
     'sha256:e2b387d319648f1ad7ed6608b2ad03580652fd49794407a83d5184a6f3a58636');
-  assert.equal(database.prepare("SELECT COUNT(*) AS count FROM sqlite_master WHERE type = 'index' AND name LIKE 'idx_%'").get().count, 9);
+  assert.deepEqual(database.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name").pluck().all(), [
+    'app_settings', 'audit_logs', 'backup_history', 'models', 'providers', 'quota_reservations',
+    'request_logs', 'usage_logs', 'user_tokens', 'users'
+  ]);
+  assert.deepEqual(database.prepare("SELECT name FROM sqlite_master WHERE type = 'index' AND name LIKE 'idx_%' ORDER BY name").pluck().all(), [
+    'idx_audit_logs_created_at', 'idx_quota_reservations_user_date', 'idx_request_logs_created_at',
+    'idx_request_logs_model_name', 'idx_request_logs_provider_id', 'idx_request_logs_status',
+    'idx_request_logs_user_id', 'idx_user_tokens_active_hash', 'idx_user_tokens_user_id'
+  ]);
   database.close();
 });
 
+test('post-migration integrity failure rolls back changes', () => {
+  const file = databasePath('post-integrity-failure');
+  const result = migrate(file, { failPostIntegrityCheck: true });
+  assert.notEqual(result.status, 0);
+  const database = open(file, { readonly: true });
+  assert.equal(database.pragma('user_version', { simple: true }), 0);
+  assert.equal(database.prepare("SELECT COUNT(*) AS count FROM sqlite_master WHERE type = 'table' AND name = 'users'").get().count, 0);
+  database.close();
+});
 test('future schema is rejected without mutation', () => {
   const file = databasePath('future');
   const database = open(file);
@@ -205,5 +226,5 @@ test('startup migration does not invoke VACUUM', () => {
   );
   legacy.close();
 
-  assertMigrated(migrate(file, true));
+  assertMigrated(migrate(file, { forbidVacuum: true }));
 });
