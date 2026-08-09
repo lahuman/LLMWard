@@ -243,6 +243,35 @@ after(async () => {
   fs.rmSync(temporaryDirectory, { recursive: true, force: true });
 });
 
+test('security headers and no-store protect browser and admin responses', async () => {
+  const health = await request('/health');
+  const dashboard = await request('/admin/');
+  const directDashboard = await request('/admin-dashboard.html');
+  const users = await admin('/admin/users');
+  const stylesheet = await request('/admin-dashboard.css');
+  const script = await request('/admin-dashboard.js');
+  const responses = [health, dashboard, directDashboard, users, stylesheet, script];
+  for (const response of responses) {
+    assert.equal(response.headers.get('x-frame-options'), 'DENY');
+    assert.equal(response.headers.get('x-content-type-options'), 'nosniff');
+    assert.equal(response.headers.get('referrer-policy'), 'no-referrer');
+    assert.equal(response.headers.get('content-security-policy'), [
+      "default-src 'self'",
+      "script-src 'self'",
+      "style-src 'self'",
+      "img-src 'self' data:",
+      "connect-src 'self'",
+      "object-src 'none'",
+      "base-uri 'none'",
+      "frame-ancestors 'none'",
+      "form-action 'self'"
+    ].join('; '));
+  }
+  assert.equal(dashboard.headers.get('cache-control'), 'no-store');
+  assert.equal(directDashboard.headers.get('cache-control'), 'no-store');
+  assert.equal(users.headers.get('cache-control'), 'no-store');
+});
+
 test('health check and admin authentication', async () => {
   assert.equal((await request('/health')).status, 200);
   assert.equal((await request('/v1/models')).status, 401);
@@ -569,15 +598,25 @@ test('provider Base URLs are canonical and fixed endpoints preserve the base pat
   ]);
 });
 
-test('dashboard is UTF-8-safe JavaScript without unsafe rendering or persistent keys', () => {
+test('dashboard uses CSP-compatible external assets and safe DOM rendering', () => {
   const html = fs.readFileSync(path.join(__dirname, '..', 'public', 'admin-dashboard.html'), 'utf8');
-  const script = html.match(/<script>([\s\S]*?)<\/script>/);
-  assert.ok(script);
-  assert.doesNotThrow(() => new vm.Script(script[1]));
-  assert.equal(/\binnerHTML\b/.test(script[1]), false);
-  assert.equal(/\blocalStorage\b/.test(script[1]), false);
-  assert.equal(/\son\w+=/.test(html), false);
+  const script = fs.readFileSync(path.join(__dirname, '..', 'public', 'admin-dashboard.js'), 'utf8');
+  assert.match(html, /<link rel="stylesheet" href="\/admin-dashboard\.css">/);
+  assert.match(html, /<script src="\/admin-dashboard\.js"><\/script>/);
+  assert.equal(/<style(?:\s|>)/i.test(html), false);
+  assert.equal(/<script(?![^>]*\bsrc=)[^>]*>[\s\S]*?<\/script>/i.test(html), false);
+  assert.equal(/\son\w+\s*=/.test(html), false);
   assert.equal(html.includes('\uFFFD'), false);
+  assert.equal(script.includes('\uFFFD'), false);
+  assert.doesNotThrow(() => new vm.Script(script));
+  for (const sink of [
+    /\binnerHTML\b/, /\bouterHTML\b/, /insertAdjacentHTML/,
+    /document\.write/, /\blocalStorage\b/
+  ]) {
+    assert.equal(sink.test(script), false);
+  }
+  assert.ok(/\btextContent\b/.test(script));
+  assert.ok(/createTextNode/.test(script));
 });
 
 test('database integrity remains valid', () => {
