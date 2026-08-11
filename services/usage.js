@@ -100,10 +100,15 @@ function releaseReservation(requestId) {
   }
 }
 
-function recordUsage(requestId, userId, model, inputTokens, outputTokens, durationMs) {
+function recordUsage(requestId, userId, model, inputTokens, outputTokens, durationMs, outcome) {
   tokenCount(inputTokens, 'input token usage');
   tokenCount(outputTokens, 'output token usage');
   responseTime(durationMs);
+  const status = outcome === undefined ? 'success' : outcome?.status;
+  const errorType = outcome === undefined ? null : outcome?.errorType;
+  const validOutcome = (status === 'success' && errorType === null) ||
+    (status === 'failure' && errorType === 'filter');
+  if (!validOutcome) throw new ApiError(500, 'Usage outcome is invalid');
   const totalTokens = inputTokens + outputTokens;
   if (!Number.isSafeInteger(totalTokens)) {
     throw new ApiError(502, 'Provider returned invalid total token usage');
@@ -136,7 +141,7 @@ function recordUsage(requestId, userId, model, inputTokens, outputTokens, durati
       INSERT INTO request_logs
         (user_id, model_name, provider_id, input_tokens, output_tokens, total_tokens,
          status, error_type, response_time_ms, estimated_cost_usd, cost_configured, created_at)
-      VALUES (?, ?, ?, ?, ?, ?, 'success', NULL, ?, ?, ?, ?)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       userId,
       model.model_name,
@@ -144,6 +149,8 @@ function recordUsage(requestId, userId, model, inputTokens, outputTokens, durati
       inputTokens,
       outputTokens,
       totalTokens,
+      status,
+      errorType,
       durationMs,
       pricing.cost,
       pricing.configured,
@@ -154,7 +161,9 @@ function recordUsage(requestId, userId, model, inputTokens, outputTokens, durati
 }
 
 function recordFailure(requestId, userId, model, errorType, durationMs) {
-  const allowedErrors = new Set(['authorization', 'quota', 'timeout', 'provider_http', 'provider_response', 'internal']);
+  const allowedErrors = new Set([
+    'authorization', 'quota', 'timeout', 'provider_http', 'provider_response', 'filter', 'internal'
+  ]);
   const safeError = allowedErrors.has(errorType) ? errorType : 'internal';
   responseTime(durationMs);
   const pricing = priceSnapshot(model, 0, 0);

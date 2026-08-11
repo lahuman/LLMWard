@@ -3,10 +3,12 @@ const { once } = require('node:events');
 const db = require('../db/database');
 const config = require('../config');
 const { validateToken } = require('../middleware/auth');
-const { reserveQuota, releaseReservation, recordUsage, recordFailure, getDailyUsage, utcDate } = require('../services/usage');
+const usage = require('../services/usage');
+const { reserveQuota, recordUsage, getDailyUsage, utcDate } = usage;
 const { buildProviderEndpoint, getAuthHeaders, getActiveModelsWithProviders } = require('../services/provider-router');
 const { ApiError } = require('../services/errors');
 const { acquire } = require('../services/limits');
+const contentFilters = require('../services/content-filters');
 
 const router = express.Router();
 const activeControllers = new Set();
@@ -57,7 +59,7 @@ function validateModelAccess(req, res, next) {
     if (!permissions) throw new ApiError(403, 'Model permissions are invalid');
 
     const model = db.prepare(`
-      SELECT m.model_name, m.max_tokens, p.id AS provider_id, p.provider_name,
+      SELECT m.id AS model_id, m.model_name, m.max_tokens, p.id AS provider_id, p.provider_name,
              p.base_url, p.auth_type, p.api_key_env_name, p.stored_api_key,
              m.input_cost_per_million, m.output_cost_per_million,
              m.max_concurrent_requests,
@@ -95,6 +97,7 @@ router.post('/chat/completions', validateToken, validateModelAccess, async (req,
   let releaseLimit;
   let timeout;
   let clientDisconnected = false;
+  let requestFinalized = false;
   const startedAt = Date.now();
   const controller = new AbortController();
   activeControllers.add(controller);
@@ -107,13 +110,17 @@ router.post('/chat/completions', validateToken, validateModelAccess, async (req,
   res.once('close', disconnect);
   try {
     releaseLimit = acquire(req.user, req.gatewayModel);
+    const filterSnapshot = contentFilters.getEffectiveFilterSnapshot(req.gatewayModel.model_id);
+    const filteredBody = contentFilters.applyInputFilters(req.body, filterSnapshot);
     reservation = reserveQuota(req.user, req.body.max_tokens, req.gatewayModel.max_tokens);
-    const payload = { ...req.body, max_tokens: reservation.maxTokens };
+    const payload = { ...filteredBody, max_tokens: reservation.maxTokens };
+    contentFilters.assertRequestSize(payload);
+    const serializedPayload = JSON.stringify(payload);
     timeout = setTimeout(() => controller.abort(), config.providerTimeout);
     const response = await fetch(buildProviderEndpoint(req.gatewayModel.base_url, 'chat/completions'), {
       method: 'POST',
       headers: getAuthHeaders(req.gatewayModel),
-      body: JSON.stringify(payload),
+      body: serializedPayload,
       signal: controller.signal,
       redirect: 'manual'
     });
@@ -125,8 +132,43 @@ router.post('/chat/completions', validateToken, validateModelAccess, async (req,
     }
 
     if (req.body.stream === true) {
-      await relayStream(response, res, reservation, req.user.id, req.gatewayModel, startedAt, controller.signal);
+      let streamUsage;
+      try {
+        streamUsage = await relayStream(
+          response,
+          res,
+          controller.signal,
+          filterSnapshot.output_mask_patterns
+        );
+      } catch (error) {
+        if (error.code === 'filter_processing_failed') {
+          controller.abort();
+          if (error.providerUsage) {
+            recordUsage(
+              reservation.requestId,
+              req.user.id,
+              req.gatewayModel,
+              error.providerUsage.inputTokens,
+              error.providerUsage.outputTokens,
+              Date.now() - startedAt,
+              { status: 'failure', errorType: 'filter' }
+            );
+            reservation = null;
+            requestFinalized = true;
+          }
+        }
+        throw error;
+      }
+      recordUsage(
+        reservation.requestId,
+        req.user.id,
+        req.gatewayModel,
+        streamUsage.inputTokens,
+        streamUsage.outputTokens,
+        Date.now() - startedAt
+      );
       reservation = null;
+      requestFinalized = true;
       return;
     }
     let body;
@@ -136,6 +178,23 @@ router.post('/chat/completions', validateToken, validateModelAccess, async (req,
       throw new ApiError(502, 'Provider returned invalid JSON', 'provider_response_invalid');
     }
     const { inputTokens, outputTokens } = usageFromProvider(body);
+    let filteredResponse;
+    try {
+      filteredResponse = contentFilters.applyOutputFilters(body, filterSnapshot);
+    } catch {
+      recordUsage(
+        reservation.requestId,
+        req.user.id,
+        req.gatewayModel,
+        inputTokens,
+        outputTokens,
+        Date.now() - startedAt,
+        { status: 'failure', errorType: 'filter' }
+      );
+      reservation = null;
+      requestFinalized = true;
+      throw new ApiError(502, 'Content filter processing failed', 'filter_processing_failed');
+    }
     recordUsage(
       reservation.requestId,
       req.user.id,
@@ -145,7 +204,8 @@ router.post('/chat/completions', validateToken, validateModelAccess, async (req,
       Date.now() - startedAt
     );
     reservation = null;
-    res.json(body);
+    requestFinalized = true;
+    res.json(filteredResponse);
   } catch (error) {
     const aborted = error.name === 'AbortError';
     const handledError = aborted
@@ -153,17 +213,27 @@ router.post('/chat/completions', validateToken, validateModelAccess, async (req,
         ? new ApiError(499, 'Client disconnected', 'client_disconnected')
         : new ApiError(504, 'Provider request timed out', 'provider_timeout')
       : error;
-    try {
-      recordFailure(
-        reservation && reservation.requestId,
-        req.user.id,
-        req.gatewayModel,
-        classifyError(handledError),
-        Date.now() - startedAt
-      );
-      reservation = null;
-    } catch {
-      if (reservation) releaseReservation(reservation.requestId);
+    if (!requestFinalized) {
+      const requestId = reservation && reservation.requestId;
+      try {
+        usage.recordFailure(
+          requestId,
+          req.user.id,
+          req.gatewayModel,
+          classifyError(handledError),
+          Date.now() - startedAt
+        );
+        reservation = null;
+        requestFinalized = true;
+      } catch {
+        try {
+          if (requestId) {
+            usage.releaseReservation(requestId);
+            reservation = null;
+            requestFinalized = true;
+          }
+        } catch {}
+      }
     }
     if (!clientDisconnected && !res.headersSent) next(handledError);
     else if (!res.writableEnded) res.destroy();
@@ -171,16 +241,39 @@ router.post('/chat/completions', validateToken, validateModelAccess, async (req,
     clearTimeout(timeout);
     activeControllers.delete(controller);
     res.off('close', disconnect);
-    if (reservation) releaseReservation(reservation.requestId);
+    if (reservation && !requestFinalized) {
+      try {
+        usage.releaseReservation(reservation.requestId);
+        reservation = null;
+        requestFinalized = true;
+      } catch {
+        // A cleanup failure must not replace the request error.
+      }
+    }
     if (releaseLimit) releaseLimit();
   }
 });
 
-async function relayStream(response, res, reservation, userId, model, startedAt, signal) {
+function setStreamHeaders(response, res) {
   res.status(200);
   res.setHeader('Content-Type', response.headers.get('content-type') || 'text/event-stream; charset=utf-8');
   res.setHeader('Cache-Control', 'no-cache');
   res.setHeader('X-Accel-Buffering', 'no');
+}
+
+async function writeStreamChunk(response, res, chunk, signal) {
+  if (!res.headersSent) {
+    setStreamHeaders(response, res);
+    res.flushHeaders();
+  }
+  if (!res.write(chunk)) await once(res, 'drain', { signal });
+}
+
+async function relayStream(response, res, signal, outputPatterns) {
+  if (outputPatterns.length > 0) {
+    return relayFilteredStream(response, res, signal, outputPatterns);
+  }
+  setStreamHeaders(response, res);
   res.flushHeaders();
   const decoder = new TextDecoder();
   let pending = '';
@@ -207,10 +300,273 @@ async function relayStream(response, res, reservation, userId, model, startedAt,
     if (!res.write(chunk)) await once(res, 'drain', { signal });
   }
   res.end();
-  recordUsage(reservation.requestId, userId, model, inputTokens, outputTokens, Date.now() - startedAt);
+  return { inputTokens, outputTokens };
+}
+
+
+function createMaskState(patterns) {
+  return {
+    filter: contentFilters.createLiteralFilter(patterns),
+    maxPatternLength: Math.max(...patterns.map((pattern) => pattern.length)),
+    choices: new Map(),
+    inputTokens: 0,
+    outputTokens: 0,
+    usageSeen: false,
+    done: false
+  };
+}
+
+function choiceState(streamState, index) {
+  let state = streamState.choices.get(index);
+  if (!state) {
+    state = { carry: '', finished: false };
+    streamState.choices.set(index, state);
+  }
+  return state;
+}
+
+function maskIncrementally(state, content, streamState, terminal = false) {
+  const combined = state.carry + content;
+  let boundary = terminal
+    ? combined.length
+    : Math.max(0, combined.length - (streamState.maxPatternLength - 1));
+  if (boundary > 0 && boundary < combined.length &&
+      /[\uD800-\uDBFF]/u.test(combined[boundary - 1]) &&
+      /[\uDC00-\uDFFF]/u.test(combined[boundary])) {
+    boundary -= 1;
+  }
+
+  if (!terminal) boundary = streamState.filter.extendBoundary(combined, boundary);
+  const output = streamState.filter.replace(combined.slice(0, boundary));
+  state.carry = combined.slice(boundary);
+  return output;
+}
+
+function filterStreamError(streamState) {
+  const error = new ApiError(502, 'Content filter processing failed', 'filter_processing_failed');
+  if (streamState.usageSeen) {
+    Object.defineProperty(error, 'providerUsage', {
+      value: {
+        inputTokens: streamState.inputTokens,
+        outputTokens: streamState.outputTokens
+      }
+    });
+  }
+  return error;
+}
+
+function isDataLine(line) {
+  return line === 'data' || line.startsWith('data:');
+}
+
+function dataValue(line) {
+  if (line === 'data') return '';
+  const value = line.slice(5);
+  return value.startsWith(' ') ? value.slice(1) : value;
+}
+
+function serializeDataEvent(lines, body, delimiter) {
+  const newline = delimiter.startsWith('\r\n') ? '\r\n' : '\n';
+  const serialized = `data: ${JSON.stringify(body)}`;
+  const output = [];
+  let inserted = false;
+  for (const line of lines) {
+    if (isDataLine(line)) {
+      if (!inserted) output.push(serialized);
+      inserted = true;
+    } else {
+      output.push(line);
+    }
+  }
+  return output.join(newline) + delimiter;
+}
+
+function flushChoices(streamState, delimiter) {
+  const choices = [];
+  for (const [index, state] of streamState.choices) {
+    if (!state.carry) continue;
+    const content = maskIncrementally(state, '', streamState, true);
+    if (content) choices.push({ index, delta: { content }, finish_reason: null });
+  }
+  if (choices.length === 0) return [];
+  return [`data: ${JSON.stringify({ choices })}${delimiter}`];
+}
+
+function transformDataEvent(rawEvent, delimiter, streamState) {
+  const lines = rawEvent.split(/\r?\n/);
+  const dataLines = lines.filter(isDataLine);
+  if (dataLines.length === 0) return [rawEvent + delimiter];
+  if (streamState.done) throw filterStreamError(streamState);
+  const data = dataLines.map(dataValue).join('\n');
+  if (data.trim() === '[DONE]') {
+    streamState.done = true;
+    return [...flushChoices(streamState, delimiter), rawEvent + delimiter];
+  }
+
+  let parsed;
+  try {
+    parsed = JSON.parse(data);
+  } catch {
+    throw filterStreamError(streamState);
+  }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    throw filterStreamError(streamState);
+  }
+
+  if (Object.hasOwn(parsed, 'usage') && parsed.usage !== null) {
+    if (!parsed.usage || typeof parsed.usage !== 'object' || Array.isArray(parsed.usage)) {
+      throw filterStreamError(streamState);
+    }
+    let providerUsage;
+    try {
+      providerUsage = usageFromProvider(parsed);
+    } catch {
+      throw filterStreamError(streamState);
+    }
+    streamState.inputTokens = providerUsage.inputTokens;
+    streamState.outputTokens = providerUsage.outputTokens;
+    streamState.usageSeen = true;
+  }
+
+  if (Object.hasOwn(parsed, 'choices')) {
+    if (!Array.isArray(parsed.choices)) throw filterStreamError(streamState);
+    const eventIndexes = new Set();
+    for (const choice of parsed.choices) {
+      if (!choice || typeof choice !== 'object' || Array.isArray(choice) ||
+          !Number.isSafeInteger(choice.index) || choice.index < 0 || eventIndexes.has(choice.index) ||
+          !choice.delta || typeof choice.delta !== 'object' || Array.isArray(choice.delta)) {
+        throw filterStreamError(streamState);
+      }
+      eventIndexes.add(choice.index);
+      const state = choiceState(streamState, choice.index);
+      if (state.finished) throw filterStreamError(streamState);
+      const hasContent = Object.hasOwn(choice.delta, 'content');
+      if (hasContent && choice.delta.content !== null && typeof choice.delta.content !== 'string') {
+        throw filterStreamError(streamState);
+      }
+      const finishes = Object.hasOwn(choice, 'finish_reason') && choice.finish_reason !== null;
+      if (finishes && typeof choice.finish_reason !== 'string') throw filterStreamError(streamState);
+      const content = typeof choice.delta.content === 'string' ? choice.delta.content : '';
+      let output = maskIncrementally(state, content, streamState);
+      if (finishes) {
+        output += maskIncrementally(state, '', streamState, true);
+        state.finished = true;
+      }
+      if (typeof choice.delta.content === 'string' || output) choice.delta.content = output;
+    }
+  }
+
+  return [serializeDataEvent(lines, parsed, delimiter)];
+}
+
+const FILTERED_SSE_EVENT_BYTE_LIMIT = 1024 * 1024;
+const INITIAL_FILTERED_SSE_EVENT_CAPACITY = 4096;
+
+function createEventAccumulator() {
+  return {
+    buffer: Buffer.allocUnsafe(INITIAL_FILTERED_SSE_EVENT_CAPACITY),
+    length: 0,
+    previousLineEndingLength: 0,
+    pendingCarriageReturn: false
+  };
+}
+
+function growEventAccumulator(pending) {
+  if (pending.length < pending.buffer.length) return;
+  const capacity = Math.min(FILTERED_SSE_EVENT_BYTE_LIMIT, pending.buffer.length * 2);
+  const buffer = Buffer.allocUnsafe(capacity);
+  pending.buffer.copy(buffer, 0, 0, pending.length);
+  pending.buffer = buffer;
+}
+
+function completeLineEnding(pending, lineEndingLength) {
+  if (pending.length === lineEndingLength) return lineEndingLength;
+  if (pending.previousLineEndingLength > 0) {
+    return pending.previousLineEndingLength + lineEndingLength;
+  }
+  pending.previousLineEndingLength = lineEndingLength;
+  return 0;
+}
+
+function appendEventByte(pending, byte, streamState) {
+  if (pending.length === FILTERED_SSE_EVENT_BYTE_LIMIT) throw filterStreamError(streamState);
+  growEventAccumulator(pending);
+  pending.buffer[pending.length] = byte;
+  pending.length += 1;
+
+  if (pending.pendingCarriageReturn) {
+    pending.pendingCarriageReturn = false;
+    if (byte === 0x0a) return completeLineEnding(pending, 2);
+    pending.previousLineEndingLength = 0;
+  }
+  if (byte === 0x0d) {
+    pending.pendingCarriageReturn = true;
+    return 0;
+  }
+  if (byte === 0x0a) return completeLineEnding(pending, 1);
+  pending.previousLineEndingLength = 0;
+  return 0;
+}
+
+function resetEventAccumulator(pending) {
+  pending.length = 0;
+  pending.previousLineEndingLength = 0;
+  pending.pendingCarriageReturn = false;
+}
+
+async function writeCompleteEvents(response, res, signal, pending, bytes, streamState) {
+  for (const byte of bytes) {
+    const delimiterLength = appendEventByte(pending, byte, streamState);
+    if (delimiterLength === 0) continue;
+    let events;
+    try {
+      const rawLength = pending.length - delimiterLength;
+      const rawEvent = new TextDecoder('utf-8', { fatal: true }).decode(
+        pending.buffer.subarray(0, rawLength)
+      );
+      events = transformDataEvent(
+        rawEvent,
+        pending.buffer.toString('ascii', rawLength, pending.length),
+        streamState
+      );
+    } catch (error) {
+      if (error.code === 'filter_processing_failed') throw error;
+      throw filterStreamError(streamState);
+    }
+    resetEventAccumulator(pending);
+    for (const event of events) {
+      await writeStreamChunk(response, res, event, signal);
+    }
+  }
+}
+
+async function relayFilteredStream(response, res, signal, patterns) {
+  const streamState = createMaskState(patterns);
+  const pending = createEventAccumulator();
+  for await (const chunk of response.body) {
+    await writeCompleteEvents(response, res, signal, pending, chunk, streamState);
+  }
+
+  if (pending.length > 0) throw filterStreamError(streamState);
+  const finalOutput = streamState.done ? [] : flushChoices(streamState, '\n\n');
+  for (const event of finalOutput) {
+    await writeStreamChunk(response, res, event, signal);
+  }
+  if (!res.headersSent) {
+    setStreamHeaders(response, res);
+    res.flushHeaders();
+  }
+  res.end();
+  return { inputTokens: streamState.inputTokens, outputTokens: streamState.outputTokens };
 }
 
 function classifyError(error) {
+  if (new Set([
+    'content_filtered',
+    'filter_configuration_invalid',
+    'filter_processing_failed',
+    'request_too_large'
+  ]).has(error.code)) return 'filter';
   if (error.status === 429) return 'quota';
   if (error.status === 401 || error.status === 403) return 'authorization';
   if (error.status === 504) return 'timeout';

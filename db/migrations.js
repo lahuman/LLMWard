@@ -1,6 +1,11 @@
 const crypto = require('crypto');
 const db = require('./database');
-const { SCHEMA_VERSION } = require('./schema');
+const {
+  SCHEMA_VERSION,
+  CONTENT_FILTER_SCHEMA_VERSION,
+  assertContentFilterSchema,
+  assertContentFilterSchemaAbsent
+} = require('./schema');
 
 const REQUIRED_COLUMNS = {
   users: [
@@ -19,6 +24,11 @@ const REQUIRED_COLUMNS = {
     'created_at', 'max_concurrent_requests'
   ],
   usage_logs: ['id', 'user_id', 'request_date', 'input_tokens', 'output_tokens', 'total_tokens'],
+  content_filters: [
+    'id', 'name', 'patterns', 'input_action', 'output_action', 'is_active', 'is_global',
+    'created_at', 'updated_at'
+  ],
+  content_filter_models: ['filter_id', 'model_id'],
   request_logs: [
     'id', 'user_id', 'model_name', 'provider_id', 'input_tokens', 'output_tokens',
     'total_tokens', 'status', 'error_type', 'response_time_ms', 'estimated_cost_usd',
@@ -98,6 +108,11 @@ function runMigrations() {
     throw new Error(`Database schema version ${currentVersion} is newer than supported version ${SCHEMA_VERSION}`);
   }
   assertForeignKeys('before');
+  if (currentVersion < CONTENT_FILTER_SCHEMA_VERSION) {
+    assertContentFilterSchemaAbsent(db);
+  } else {
+    assertContentFilterSchema(db);
+  }
 
   const previousSecureDelete = db.pragma('secure_delete', { simple: true });
   db.pragma('secure_delete = ON');
@@ -144,6 +159,27 @@ function runMigrations() {
         created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
         FOREIGN KEY(provider_id) REFERENCES providers(id)
       );
+      CREATE TABLE IF NOT EXISTS content_filters (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        name TEXT UNIQUE NOT NULL,
+        patterns TEXT NOT NULL,
+        input_action TEXT CHECK(input_action IN ('block', 'mask') OR input_action IS NULL),
+        output_action TEXT CHECK(output_action = 'mask' OR output_action IS NULL),
+        is_active INTEGER NOT NULL DEFAULT 0 CHECK(is_active IN (0, 1)),
+        is_global INTEGER NOT NULL DEFAULT 0 CHECK(is_global IN (0, 1)),
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        CHECK(input_action IS NOT NULL OR output_action IS NOT NULL)
+      );
+
+      CREATE TABLE IF NOT EXISTS content_filter_models (
+        filter_id INTEGER NOT NULL,
+        model_id INTEGER NOT NULL,
+        PRIMARY KEY(filter_id, model_id),
+        FOREIGN KEY(filter_id) REFERENCES content_filters(id) ON DELETE CASCADE,
+        FOREIGN KEY(model_id) REFERENCES models(id) ON DELETE CASCADE
+      );
+
 
       CREATE TABLE IF NOT EXISTS usage_logs (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -273,6 +309,7 @@ function runMigrations() {
       CREATE INDEX IF NOT EXISTS idx_request_logs_user_id ON request_logs(user_id);
       CREATE INDEX IF NOT EXISTS idx_request_logs_model_name ON request_logs(model_name);
       CREATE INDEX IF NOT EXISTS idx_request_logs_provider_id ON request_logs(provider_id);
+      CREATE INDEX IF NOT EXISTS idx_content_filter_models_model_id ON content_filter_models(model_id);
       CREATE INDEX IF NOT EXISTS idx_request_logs_status ON request_logs(status);
       CREATE INDEX IF NOT EXISTS idx_quota_reservations_user_date ON quota_reservations(user_id, request_date);
       CREATE INDEX IF NOT EXISTS idx_user_tokens_user_id ON user_tokens(user_id);
@@ -280,6 +317,7 @@ function runMigrations() {
       CREATE INDEX IF NOT EXISTS idx_audit_logs_created_at ON audit_logs(created_at);
       `);
       const postMigrationIntegrity = db.pragma('integrity_check')[0].integrity_check;
+      assertContentFilterSchema(db);
       if (postMigrationIntegrity !== 'ok') {
         throw new Error('Database integrity check failed after migrations');
       }

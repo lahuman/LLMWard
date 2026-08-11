@@ -83,10 +83,24 @@ test('verifyDatabase rejects foreign-key violations', () => {
 test('verifyDatabase rejects non-current schema version', () => {
   const file = fixturePath('future.db');
   const fixture = new Database(file);
-  fixture.pragma('user_version = 3');
+  fixture.pragma('user_version = 4');
   fixture.close();
 
   assert.throws(() => verifyDatabase(file), /schema version/i);
+});
+
+test('verifyDatabase rejects current schema missing the content filter join table or model index', () => {
+  for (const missing of ['join-table', 'model-index']) {
+    const file = fixturePath('current-missing-' + missing + '.db');
+    createCurrentSchema(file);
+    const fixture = new Database(file);
+    fixture.exec(missing === 'join-table'
+      ? 'DROP TABLE content_filter_models'
+      : 'DROP INDEX idx_content_filter_models_model_id');
+    fixture.close();
+
+    assert.throws(() => verifyDatabase(file), /content_filter|schema/i);
+  }
 });
 
 test('createBackup publishes only a fully verified artifact', () => {
@@ -95,7 +109,7 @@ test('createBackup publishes only a fully verified artifact', () => {
 
   const result = createBackup(livePath);
   assert.equal(result.integrity, 'ok');
-  assert.equal(result.schema_version, 2);
+  assert.equal(result.schema_version, 3);
   assert.equal(typeof result.filename, 'string');
   assert.equal(typeof result.created_at, 'string');
 
@@ -104,12 +118,12 @@ test('createBackup publishes only a fully verified artifact', () => {
   const backup = new Database(backupPath, { readonly: true, fileMustExist: true });
   assert.deepEqual(backup.pragma('integrity_check'), [{ integrity_check: 'ok' }]);
   assert.deepEqual(backup.pragma('foreign_key_check'), []);
-  assert.equal(backup.pragma('user_version', { simple: true }), 2);
+  assert.equal(backup.pragma('user_version', { simple: true }), 3);
   assert.deepEqual(
     backup.prepare('SELECT filename, schema_version, created_at, integrity_status FROM backup_history').all(),
     [{
       filename: result.filename,
-      schema_version: 2,
+      schema_version: 3,
       created_at: result.created_at,
       integrity_status: 'ok'
     }]
@@ -124,7 +138,7 @@ test('createBackup publishes only a fully verified artifact', () => {
     live.prepare('SELECT filename, schema_version, created_at, integrity_status FROM backup_history').all(),
     [{
       filename: result.filename,
-      schema_version: 2,
+      schema_version: 3,
       created_at: result.created_at,
       integrity_status: 'ok'
     }]
@@ -180,7 +194,7 @@ test('verify-backup validates an independently copied restore without opening th
     env: { ...process.env, DATABASE_PATH: livePath }
   });
   assert.equal(verification.status, 0, verification.stdout + verification.stderr);
-  assert.equal(verification.stdout, 'Backup verified: integrity=ok schema=2\n');
+  assert.equal(verification.stdout, 'Backup verified: integrity=ok schema=3\n');
   assert.equal(verification.stderr, '');
 
   assert.deepEqual(snapshot(), filesBefore);
@@ -297,7 +311,7 @@ test('post-publication failure reports incomplete exact-final cleanup without ma
   const remaining = fs.readdirSync(backupDirectory);
   assert.equal(remaining.length, 1);
   assert.equal(remaining[0].startsWith('gateway-'), true);
-  assert.deepEqual(verifyDatabase(path.join(backupDirectory, remaining[0])), { integrity: 'ok', schemaVersion: 2 });
+  assert.deepEqual(verifyDatabase(path.join(backupDirectory, remaining[0])), { integrity: 'ok', schemaVersion: 3 });
 
   const live = new Database(livePath, { readonly: true, fileMustExist: true });
   assert.equal(historyCount(live), 0);

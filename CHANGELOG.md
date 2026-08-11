@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Added schema version 3 declarative literal content filters with global or model scope, input block/mask, and non-streaming or SSE output masking.
+- Added filter administration API/dashboard support with inactive defaults, fail-closed errors, privacy-preserving audit/request records, and provider-usage accounting on post-response failures.
+
 ## 1.0.1 - 2026-08-09
 
 - Hardened streaming cleanup and provider URL validation without expanding the supported API surface.

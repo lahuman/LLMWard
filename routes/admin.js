@@ -9,6 +9,7 @@ const { hashToken } = require('../db/migrations');
 const { audit } = require('../services/audit');
 const { createBackup } = require('../services/backup');
 const { retentionDays, cleanupRequestLogs, setRetentionDays } = require('../services/retention');
+const { listFilters, createFilter, updateFilter, deleteFilter } = require('../services/content-filters');
 
 const router = express.Router();
 const IDENTIFIER = /^[a-z0-9][a-z0-9_.-]{0,127}$/;
@@ -33,6 +34,7 @@ const FAILURE_AUDIT_FAMILIES = new Map([
   ['users', { action: 'user.change', targetType: 'user', hasTargetId: true }],
   ['models', { action: 'model.change', targetType: 'model', hasTargetId: true }],
   ['providers', { action: 'provider.change', targetType: 'provider', hasTargetId: true }],
+  ['filters', { action: 'filter.change', targetType: 'filter', hasTargetId: true }],
   ['provider-presets', { action: 'provider-preset.change', targetType: 'provider-preset' }],
   ['usage', { action: 'usage.change', targetType: 'usage' }],
   ['onboarding', { action: 'onboarding.change', targetType: 'onboarding' }],
@@ -570,6 +572,28 @@ router.delete('/models/:id', (req, res, next) => {
     db.prepare('DELETE FROM models WHERE id = ?').run(modelId);
     audit('model.delete', 'model', modelId, true, []);
     res.json({ message: 'Model deleted' });
+  } catch (error) { next(error); }
+});
+
+router.get('/filters', (req, res, next) => {
+  try { res.json(listFilters()); }
+  catch (error) { next(error); }
+});
+
+router.post('/filters', (req, res, next) => {
+  try { res.status(201).json(createFilter(req.body)); }
+  catch (error) { next(error); }
+});
+
+router.put('/filters/:id', (req, res, next) => {
+  try { res.json(updateFilter(req.params.id, req.body)); }
+  catch (error) { next(error); }
+});
+
+router.delete('/filters/:id', (req, res, next) => {
+  try {
+    deleteFilter(req.params.id);
+    res.json({ message: 'Filter deleted' });
   } catch (error) { next(error); }
 });
 

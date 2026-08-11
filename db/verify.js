@@ -1,5 +1,5 @@
 const Database = require('better-sqlite3');
-const { SCHEMA_VERSION } = require('./schema');
+const { SCHEMA_VERSION, assertContentFilterSchema } = require('./schema');
 
 function verifyDatabase(filePath) {
   let database;
@@ -16,6 +16,7 @@ function verifyDatabase(filePath) {
     if (schemaVersion !== SCHEMA_VERSION) {
       throw new Error(`Database schema version ${schemaVersion} is not supported`);
     }
+    assertContentFilterSchema(database);
     return { integrity: 'ok', schemaVersion };
   } finally {
     if (database && database.open) database.close();

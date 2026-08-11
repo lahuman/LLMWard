@@ -1038,7 +1038,7 @@ test('online backup, retention, audit privacy, doctor, and Docker healthcheck ar
   const backupPath = path.join(path.dirname(databasePath), 'backups', backup.body.filename);
   const copy = new Database(backupPath, { readonly: true });
   assert.equal(copy.pragma('integrity_check')[0].integrity_check, 'ok');
-  assert.equal(copy.pragma('user_version', { simple: true }), 2);
+  assert.equal(copy.pragma('user_version', { simple: true }), 3);
   copy.close();
 
   const user = await createUser('retention-user', ['standard']);
