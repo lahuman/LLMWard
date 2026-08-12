@@ -73,6 +73,13 @@ function positive(value, name) {
   return value;
 }
 
+function nonNegative(value, name) {
+  if (!Number.isSafeInteger(value) || value < 0) {
+    throw new ApiError(400, `${name} must be a non-negative safe integer`);
+  }
+  return value;
+}
+
 function id(value, name = 'id') {
   const parsed = Number(value);
   return positive(parsed, name);
@@ -322,8 +329,12 @@ router.use((req, res, next) => {
 router.post('/users', (req, res, next) => {
   try {
     const username = nonEmpty(req.body.username, 'username');
-    const inputQuota = req.body.max_daily_input_tokens === undefined ? 100000 : positive(req.body.max_daily_input_tokens, 'max_daily_input_tokens');
-    const outputQuota = req.body.max_daily_output_tokens === undefined ? 50000 : positive(req.body.max_daily_output_tokens, 'max_daily_output_tokens');
+    const inputQuota = req.body.max_daily_input_tokens === undefined
+      ? 0
+      : nonNegative(req.body.max_daily_input_tokens, 'max_daily_input_tokens');
+    const outputQuota = req.body.max_daily_output_tokens === undefined
+      ? 0
+      : nonNegative(req.body.max_daily_output_tokens, 'max_daily_output_tokens');
     const allowed = req.body.allowed_models === undefined ? null : validateAllowedModels(req.body.allowed_models);
     const rpm = req.body.max_requests_per_minute === undefined ? 60 : positive(req.body.max_requests_per_minute, 'max_requests_per_minute');
     const concurrency = req.body.max_concurrent_requests === undefined ? 2 : positive(req.body.max_concurrent_requests, 'max_concurrent_requests');
@@ -365,10 +376,12 @@ router.put('/users/:id', (req, res, next) => {
     const fields = [];
     const values = [];
     if (req.body.max_daily_input_tokens !== undefined) {
-      fields.push('max_daily_input_tokens = ?'); values.push(positive(req.body.max_daily_input_tokens, 'max_daily_input_tokens'));
+      fields.push('max_daily_input_tokens = ?');
+      values.push(nonNegative(req.body.max_daily_input_tokens, 'max_daily_input_tokens'));
     }
     if (req.body.max_daily_output_tokens !== undefined) {
-      fields.push('max_daily_output_tokens = ?'); values.push(positive(req.body.max_daily_output_tokens, 'max_daily_output_tokens'));
+      fields.push('max_daily_output_tokens = ?');
+      values.push(nonNegative(req.body.max_daily_output_tokens, 'max_daily_output_tokens'));
     }
     if (req.body.max_requests_per_minute !== undefined) {
       fields.push('max_requests_per_minute = ?'); values.push(positive(req.body.max_requests_per_minute, 'max_requests_per_minute'));

@@ -52,8 +52,8 @@ function reserveQuota(user, requestedMaxTokens, modelMaxTokens) {
       (!Number.isSafeInteger(requestedMaxTokens) || requestedMaxTokens <= 0)) {
     throw new ApiError(400, 'max_tokens must be a positive safe integer');
   }
-  if (!Number.isSafeInteger(user.max_daily_input_tokens) || user.max_daily_input_tokens <= 0 ||
-      !Number.isSafeInteger(user.max_daily_output_tokens) || user.max_daily_output_tokens <= 0) {
+  if (!Number.isSafeInteger(user.max_daily_input_tokens) || user.max_daily_input_tokens < 0 ||
+      !Number.isSafeInteger(user.max_daily_output_tokens) || user.max_daily_output_tokens < 0) {
     throw new ApiError(500, 'User quota configuration is invalid');
   }
 
@@ -69,17 +69,21 @@ function reserveQuota(user, requestedMaxTokens, modelMaxTokens) {
     tokenCount(usage.input_tokens, 'stored input token usage');
     tokenCount(usage.output_tokens, 'stored output token usage');
 
-    if (usage.input_tokens >= user.max_daily_input_tokens) {
+    if (user.max_daily_input_tokens > 0 &&
+        usage.input_tokens >= user.max_daily_input_tokens) {
       throw new ApiError(429, 'Daily input token quota exceeded');
     }
 
-    const reserved = db.prepare(`
-      SELECT COALESCE(SUM(output_tokens), 0) AS tokens
-      FROM quota_reservations WHERE user_id = ? AND request_date = ?
-    `).get(user.id, date).tokens;
-    const remaining = user.max_daily_output_tokens - usage.output_tokens - reserved;
-    if (!Number.isSafeInteger(remaining) || remaining <= 0) {
-      throw new ApiError(429, 'Daily output token quota exceeded');
+    let remaining = modelMaxTokens;
+    if (user.max_daily_output_tokens > 0) {
+      const reserved = db.prepare(`
+        SELECT COALESCE(SUM(output_tokens), 0) AS tokens
+        FROM quota_reservations WHERE user_id = ? AND request_date = ?
+      `).get(user.id, date).tokens;
+      remaining = user.max_daily_output_tokens - usage.output_tokens - reserved;
+      if (!Number.isSafeInteger(remaining) || remaining <= 0) {
+        throw new ApiError(429, 'Daily output token quota exceeded');
+      }
     }
 
     const maxTokens = Math.min(requestedMaxTokens || modelMaxTokens, modelMaxTokens, remaining);

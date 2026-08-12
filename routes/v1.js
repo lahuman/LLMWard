@@ -585,8 +585,12 @@ router.get('/usage', validateToken, (req, res, next) => {
       date: usage.request_date,
       inputTokens: usage.input_tokens,
       outputTokens: usage.output_tokens,
-      remainingInput: Math.max(0, req.user.max_daily_input_tokens - usage.input_tokens),
-      remainingOutput: Math.max(0, req.user.max_daily_output_tokens - usage.output_tokens)
+      remainingInput: req.user.max_daily_input_tokens === 0
+        ? null
+        : Math.max(0, req.user.max_daily_input_tokens - usage.input_tokens),
+      remainingOutput: req.user.max_daily_output_tokens === 0
+        ? null
+        : Math.max(0, req.user.max_daily_output_tokens - usage.output_tokens)
     });
   } catch (error) {
     next(error);

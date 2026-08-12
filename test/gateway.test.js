@@ -316,6 +316,56 @@ test('user creation authenticates and user lists never disclose tokens', async (
   assert.equal(Object.hasOwn(users.body[0], 'api_token'), false);
 });
 
+test('new users default both daily token quotas to unlimited', async () => {
+  const created = await admin('/admin/users', {
+    method: 'POST', body: { username: 'default-unlimited-user', allowed_models: ['standard'] }
+  });
+  assert.equal(created.status, 201);
+  const defaultUser = (await admin('/admin/users')).body.find((user) => user.id === created.body.userId);
+  assert.deepEqual({
+    input: defaultUser.max_daily_input_tokens,
+    output: defaultUser.max_daily_output_tokens
+  }, { input: 0, output: 0 });
+});
+
+test('user quota updates accept zero', async () => {
+
+  const limited = await createUser('zero-update-user', ['standard'], 5, 6);
+  const updated = await admin(`/admin/users/${limited.id}`, {
+    method: 'PUT', body: { max_daily_input_tokens: 0, max_daily_output_tokens: 0 }
+  });
+  assert.equal(updated.status, 200);
+  assert.equal(updated.body.max_daily_input_tokens, 0);
+  assert.equal(updated.body.max_daily_output_tokens, 0);
+});
+
+test('zero daily quotas allow repeated requests', async () => {
+  const user = await createUser('unlimited-runtime-user', ['standard'], 0, 0);
+
+  assert.equal((await chat(user.token, 'standard', 1)).status, 200);
+  assert.equal((await chat(user.token, 'standard', 1)).status, 200);
+});
+
+test('zero output quota preserves request and model output limits', async () => {
+  const user = await createUser('unlimited-maximum-user', ['standard'], 0, 0);
+  const before = (receivedMaximums.get('standard') || []).length;
+
+  assert.equal((await chat(user.token, 'standard', 999999)).status, 200);
+  assert.equal((await chat(user.token, 'standard', 2)).status, 200);
+  assert.deepEqual(receivedMaximums.get('standard').slice(before), [8, 2]);
+});
+
+test('usage reports null remaining tokens for unlimited quotas', async () => {
+  const user = await createUser('unlimited-usage-user', ['standard'], 0, 0);
+
+  const usage = await request('/dashboard/usage', {
+    headers: { Authorization: `Bearer ${user.token}` }
+  });
+  assert.equal(usage.status, 200);
+  assert.equal(usage.body.remainingInput, null);
+  assert.equal(usage.body.remainingOutput, null);
+});
+
 test('successful admin audits keep only fixed supported field names', async () => {
   const user = await createUser('audit-success-user', ['standard']);
   const marker = `prompt_${crypto.randomBytes(12).toString('hex')}`;
@@ -494,6 +544,18 @@ test('output quota is enforced', async () => {
   assert.equal(providerCalls.get('output-limit'), 1);
 });
 
+test('zero input quota leaves a positive output quota enforced', async () => {
+  const outputLimited = await createUser('unlimited-input-user', ['output-limit'], 0, 2);
+  assert.equal((await chat(outputLimited.token, 'output-limit', 2)).status, 200);
+  assert.equal((await chat(outputLimited.token, 'output-limit', 1)).status, 429);
+});
+
+test('zero output quota leaves a positive input quota enforced', async () => {
+  const inputLimited = await createUser('unlimited-output-user', ['input-limit'], 2, 0);
+  assert.equal((await chat(inputLimited.token, 'input-limit', 1)).status, 200);
+  assert.equal((await chat(inputLimited.token, 'input-limit', 1)).status, 429);
+});
+
 test('concurrent requests cannot oversubscribe output quota', async () => {
   const user = await createUser('concurrent-user', ['concurrent'], 20, 5);
   const responses = await Promise.all([chat(user.token, 'concurrent', 4), chat(user.token, 'concurrent', 4)]);
@@ -625,7 +687,10 @@ test('statistics include failures, response times, groupings, and immutable pric
 test('admin input validation rejects unsafe values and references', async () => {
   const cases = [
     admin('/admin/users', { method: 'POST', body: { username: ' ', max_daily_input_tokens: 1, max_daily_output_tokens: 1 } }),
-    admin('/admin/users', { method: 'POST', body: { username: 'invalid-quota', max_daily_input_tokens: 0, max_daily_output_tokens: 1 } }),
+    admin('/admin/users', { method: 'POST', body: { username: 'negative-input-quota', max_daily_input_tokens: -1, max_daily_output_tokens: 1 } }),
+    admin('/admin/users', { method: 'POST', body: { username: 'negative-output-quota', max_daily_input_tokens: 1, max_daily_output_tokens: -1 } }),
+    admin('/admin/users', { method: 'POST', body: { username: 'fractional-quota', max_daily_input_tokens: 1.5, max_daily_output_tokens: 1 } }),
+    admin('/admin/users', { method: 'POST', body: { username: 'unsafe-quota', max_daily_input_tokens: 1, max_daily_output_tokens: Number.MAX_SAFE_INTEGER + 1 } }),
     admin('/admin/users', { method: 'POST', body: { username: 'unknown-model', max_daily_input_tokens: 1, max_daily_output_tokens: 1, allowed_models: ['missing'] } }),
     admin('/admin/models', { method: 'POST', body: { model_name: 'UPPER', display_name: 'Bad', provider_id: providerId, max_tokens: 1 } }),
     admin('/admin/models', { method: 'POST', body: { model_name: 'missing-provider', display_name: 'Bad', provider_id: 999999, max_tokens: 1 } }),
