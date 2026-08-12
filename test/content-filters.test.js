@@ -338,12 +338,16 @@ test('filter, assignment, and success audit mutations roll back together', () =>
   );
 });
 
-test('effective snapshot is the active global and assigned-model union without rule identifiers', () => {
+test('effective snapshot keeps ordered immutable input-block policy metadata', () => {
   const requestedModel = insertModel('requested');
   const otherModel = insertModel('other');
   createFilter({
-    name: 'global-name-must-not-leak', patterns: ['global'], input_action: 'block',
+    name: 'Global input policy', patterns: ['global'], input_action: 'block',
     is_active: true, is_global: true
+  });
+  createFilter({
+    name: 'Assigned input policy', patterns: ['assigned-block'], input_action: 'block',
+    is_active: true, model_ids: [requestedModel]
   });
   createFilter({
     name: 'assigned-name-must-not-leak', patterns: ['assigned'], input_action: 'mask', output_action: 'mask',
@@ -361,16 +365,23 @@ test('effective snapshot is the active global and assigned-model union without r
 
   const snapshot = getEffectiveFilterSnapshot(requestedModel);
   assert.deepEqual(snapshot, {
-    input_block_patterns: ['global'],
+    input_block_patterns: ['global', 'assigned-block'],
     input_mask_patterns: ['assigned'],
-    output_mask_patterns: ['assigned']
+    output_mask_patterns: ['assigned'],
+    input_block_policies: [
+      { name: 'Global input policy', patterns: ['global'] },
+      { name: 'Assigned input policy', patterns: ['assigned-block'] }
+    ]
   });
   const serialized = JSON.stringify(snapshot);
-  for (const privateValue of ['global-name-must-not-leak', 'assigned-name-must-not-leak', 'other-only', 'no-op', 'inactive']) {
+  for (const privateValue of ['assigned-name-must-not-leak', 'other-only', 'no-op', 'inactive']) {
     assert.equal(serialized.includes(privateValue), false);
   }
   assert.equal(Object.isFrozen(snapshot), true);
   assert.equal(Object.isFrozen(snapshot.input_block_patterns), true);
+  assert.equal(Object.isFrozen(snapshot.input_block_policies), true);
+  assert.equal(Object.isFrozen(snapshot.input_block_policies[0]), true);
+  assert.equal(Object.isFrozen(snapshot.input_block_policies[0].patterns), true);
 });
 
 test('stored configuration corruption fails closed with a fixed identifier-free error', () => {
@@ -430,11 +441,32 @@ test('SQLite read failures are not misclassified as damaged filter configuration
 
 test('input filtering blocks original text before masking and masks only independent text contents', () => {
   const blocking = {
-    input_block_patterns: ['blocked'], input_mask_patterns: ['block'], output_mask_patterns: []
+    input_block_patterns: ['first literal', 'second literal'],
+    input_mask_patterns: ['block'],
+    output_mask_patterns: [],
+    input_block_policies: [
+      { name: 'First input policy', patterns: ['first literal'] },
+      { name: 'Second input policy', patterns: ['second literal'] }
+    ]
   };
-  apiError(() => applyInputFilters({ messages: [{ content: 'BLOCKED' }] }, blocking), {
-    status: 400, code: 'content_filtered'
+  const blockedContent = ['SECOND LITERAL', 'FIRST LITERAL'];
+  let filterError;
+  assert.throws(() => applyInputFilters({
+    messages: [
+      { content: blockedContent[0] },
+      { content: [{ type: 'text', text: blockedContent[1] }] }
+    ]
+  }, blocking), (error) => {
+    filterError = error;
+    assert.equal(error.status, 400);
+    assert.equal(error.code, 'content_filtered');
+    return true;
   });
+  assert.equal(filterError.filterName, 'First input policy');
+  const serializedError = JSON.stringify(filterError);
+  assert.equal(serializedError.includes('first literal'), false);
+  assert.equal(serializedError.includes('second literal'), false);
+  assert.equal(blockedContent.some((text) => serializedError.includes(text)), false);
 
   const original = {
     model: 'unchanged',
@@ -469,6 +501,72 @@ test('input filtering blocks original text before masking and masks only indepen
   assert.deepEqual(filtered.vendor, original.vendor);
   assert.equal(filtered.model, 'unchanged');
   assert.equal(filtered.stream, false);
+});
+
+test('present input-block policy metadata is validated fail closed', () => {
+  const body = { messages: [{ content: 'blocked' }] };
+  const base = {
+    input_block_patterns: ['blocked'],
+    input_mask_patterns: [],
+    output_mask_patterns: []
+  };
+  const invalidPolicies = [
+    null,
+    [{ name: ' ', patterns: ['blocked'] }],
+    [{ name: 'Policy', patterns: [1] }],
+    [{ name: 'Policy', patterns: ['different'] }],
+    [{ name: 'Policy', patterns: ['blocked'], extra: 'not allowed' }]
+  ];
+
+  for (const input_block_policies of invalidPolicies) {
+    assert.throws(() => applyInputFilters(body, { ...base, input_block_policies }), (error) => {
+      assert.equal(error.status, 500);
+      assert.equal(error.code, 'filter_configuration_invalid');
+      assert.equal(error.message, 'Content filter configuration is invalid');
+      assert.equal(Object.hasOwn(error, 'filterName'), false);
+      return true;
+    });
+  }
+
+  assert.throws(() => applyInputFilters(body, base), (error) => {
+    assert.equal(error.code, 'content_filtered');
+    assert.equal(Object.hasOwn(error, 'filterName'), false);
+    return true;
+  });
+});
+
+test('input-block attribution builds one literal plan regardless of policy count', () => {
+  const input_block_policies = Array.from({ length: 40 }, (_, index) => ({
+    name: 'Policy ' + index,
+    patterns: ['bounded-attribution-' + index + '-end']
+  }));
+  const input_block_patterns = input_block_policies.flatMap((policy) => policy.patterns);
+  const nativeStringify = JSON.stringify;
+  let planLookups = 0;
+  JSON.stringify = function observedStringify(value, ...args) {
+    if (Array.isArray(value) && value.length > 0 && value.every((item) =>
+      typeof item === 'string' && item.startsWith('bounded-attribution-'))) {
+      planLookups += 1;
+    }
+    return nativeStringify.call(this, value, ...args);
+  };
+  try {
+    assert.throws(() => applyInputFilters({
+      messages: [{ content: 'bounded-attribution-39-end' }]
+    }, {
+      input_block_patterns,
+      input_mask_patterns: [],
+      output_mask_patterns: [],
+      input_block_policies
+    }), (error) => {
+      assert.equal(error.code, 'content_filtered');
+      assert.equal(error.filterName, 'Policy 39');
+      return true;
+    });
+  } finally {
+    JSON.stringify = nativeStringify;
+  }
+  assert.equal(planLookups, 1);
 });
 
 test('masking is literal, Unicode case-insensitive, leftmost, and longest at the same position', () => {

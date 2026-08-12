@@ -349,6 +349,7 @@ function getEffectiveFilterSnapshot(modelId) {
   const normalizedModelId = normalizeId(modelId);
   return fixedConfiguration(() => {
     const inputBlockPatterns = [];
+    const inputBlockPolicies = [];
     const inputMaskPatterns = [];
     const outputMaskPatterns = [];
     let total = 0;
@@ -367,14 +368,18 @@ function getEffectiveFilterSnapshot(modelId) {
       const filter = storedFilter(row);
       total += filter.patterns.length;
       if (!Number.isSafeInteger(total) || total > MAX_STORED_PATTERNS) throw configurationError();
-      if (filter.input_action === 'block') inputBlockPatterns.push(...filter.patterns);
+      if (filter.input_action === 'block') {
+        inputBlockPatterns.push(...filter.patterns);
+        inputBlockPolicies.push(Object.freeze({ name: filter.name, patterns: Object.freeze([...filter.patterns]) }));
+      }
       if (filter.input_action === 'mask') inputMaskPatterns.push(...filter.patterns);
       if (filter.output_action === 'mask') outputMaskPatterns.push(...filter.patterns);
     }
     return Object.freeze({
       input_block_patterns: Object.freeze(inputBlockPatterns),
       input_mask_patterns: Object.freeze(inputMaskPatterns),
-      output_mask_patterns: Object.freeze(outputMaskPatterns)
+      output_mask_patterns: Object.freeze(outputMaskPatterns),
+      input_block_policies: Object.freeze(inputBlockPolicies)
     });
   });
 }
@@ -386,6 +391,37 @@ function snapshotPatterns(snapshot, field) {
     const normalized = normalizePatterns(original, { allowEmpty: true, allowDuplicates: true });
     if (original.some((pattern, index) => pattern !== normalized[index])) throw configurationError();
     return normalized;
+  });
+}
+
+function snapshotBlockPolicyNames(snapshot, blocking) {
+  if (!Object.hasOwn(snapshot, 'input_block_policies')) return null;
+  return fixedConfiguration(() => {
+    const policies = snapshot.input_block_policies;
+    if (!Array.isArray(policies)) throw configurationError();
+    const namesByPattern = [];
+    let patternIndex = 0;
+    for (const policy of policies) {
+      if (!policy || typeof policy !== 'object' || Array.isArray(policy) ||
+          Object.getPrototypeOf(policy) !== Object.prototype) {
+        throw configurationError();
+      }
+      const fields = Object.keys(policy).sort();
+      if (fields.length !== 2 || fields[0] !== 'name' || fields[1] !== 'patterns') {
+        throw configurationError();
+      }
+      const name = normalizeName(policy.name);
+      if (name !== policy.name || !Array.isArray(policy.patterns) || policy.patterns.length === 0) {
+        throw configurationError();
+      }
+      for (const pattern of policy.patterns) {
+        if (pattern !== blocking[patternIndex]) throw configurationError();
+        namesByPattern.push(name);
+        patternIndex += 1;
+      }
+    }
+    if (patternIndex !== blocking.length) throw configurationError();
+    return namesByPattern;
   });
 }
 
@@ -402,6 +438,8 @@ function buildLiteralAutomaton(patterns) {
       exactChildren: new Map(),
       terminalLengths: new Set(),
       outputLengths: [],
+      terminalPatternIndex: -1,
+      minimumOutputPatternIndex: -1,
       failure: null,
       membership: null
     };
@@ -438,7 +476,7 @@ function buildLiteralAutomaton(patterns) {
     );
   let maxPatternLength = 0;
 
-  for (const { characters } of prioritized) {
+  for (const { characters, index } of prioritized) {
     maxPatternLength = Math.max(maxPatternLength, characters.length);
     let node = root;
     for (const character of characters) {
@@ -456,6 +494,7 @@ function buildLiteralAutomaton(patterns) {
       node = edge.node;
     }
     node.terminalLengths.add(characters.length);
+    node.terminalPatternIndex = node.terminalPatternIndex < 0 ? index : Math.min(node.terminalPatternIndex, index);
   }
 
   for (const node of nodes) {
@@ -498,12 +537,21 @@ function buildLiteralAutomaton(patterns) {
     return [...lengths].sort((left, right) => right - left);
   }
 
+  function mergedPatternIndex(node) {
+    const failureIndex = node === root ? -1 : node.failure.minimumOutputPatternIndex;
+    if (node.terminalPatternIndex < 0) return failureIndex;
+    if (failureIndex < 0) return node.terminalPatternIndex;
+    return Math.min(node.terminalPatternIndex, failureIndex);
+  }
+
   root.failure = root;
   root.outputLengths = [...root.terminalLengths].sort((left, right) => right - left);
+  root.minimumOutputPatternIndex = mergedPatternIndex(root);
   const queue = [];
   for (const edge of root.children) {
     edge.node.failure = root;
     edge.node.outputLengths = mergedOutputs(edge.node);
+    edge.node.minimumOutputPatternIndex = mergedPatternIndex(edge.node);
     queue.push(edge.node);
   }
 
@@ -518,6 +566,7 @@ function buildLiteralAutomaton(patterns) {
       }
       edge.node.failure = candidate ? candidate.node : root;
       edge.node.outputLengths = mergedOutputs(edge.node);
+      edge.node.minimumOutputPatternIndex = mergedPatternIndex(edge.node);
       queue.push(edge.node);
     }
   }
@@ -874,11 +923,26 @@ function literalPlanMatches(plan, value) {
   return false;
 }
 
+function literalPlanFirstPatternIndex(plan, value) {
+  const context = createScanContext(plan);
+  let state = plan.root;
+  let minimum = -1;
+  for (const character of value) {
+    state = advanceAutomaton(context, state, character);
+    const current = state.minimumOutputPatternIndex;
+    if (current < 0 || (minimum >= 0 && current >= minimum)) continue;
+    minimum = current;
+    if (minimum === 0) return minimum;
+  }
+  return minimum;
+}
+
 function createLiteralFilter(patterns) {
   const plan = getLiteralAutomaton(patterns);
   if (!plan) {
     return Object.freeze({
       test: () => false,
+      firstPatternIndex: () => -1,
       replace: (value) => value,
       extendBoundary: (value, boundary) => boundary
     });
@@ -887,6 +951,9 @@ function createLiteralFilter(patterns) {
   return Object.freeze({
     test(value) {
       return literalPlanMatches(plan, value);
+    },
+    firstPatternIndex(value) {
+      return literalPlanFirstPatternIndex(plan, value);
     },
     replace(value, replacement = FILTERED) {
       if (plan.maxPatternLength !== 1 && !literalPlanMatches(plan, value)) return value;
@@ -943,11 +1010,6 @@ function createLiteralFilter(patterns) {
     }
   });
 }
-function createPatternTester(patterns) {
-  const filter = createLiteralFilter(patterns);
-  return (value) => filter.test(value);
-}
-
 function createMasker(patterns) {
   const filter = createLiteralFilter(patterns);
   return (value) => filter.replace(value);
@@ -978,9 +1040,28 @@ function forEachRequestContent(body, visit) {
 function applyInputFilters(body, snapshot) {
   const blocking = snapshotPatterns(snapshot, 'input_block_patterns');
   const masking = snapshotPatterns(snapshot, 'input_mask_patterns');
-  const isBlocked = createPatternTester(blocking);
-  const blocked = forEachRequestContent(body, (target, field) => isBlocked(target[field]));
-  if (blocked) throw new ApiError(400, 'Request content was filtered', 'content_filtered');
+  const policyNamesByPattern = snapshotBlockPolicyNames(snapshot, blocking);
+  if (blocking.length > 0) {
+    const block = createLiteralFilter(blocking);
+    let blockedPatternIndex = -1;
+    let blocked;
+    if (policyNamesByPattern === null) {
+      blocked = forEachRequestContent(body, (target, field) => block.test(target[field]));
+    } else {
+      forEachRequestContent(body, (target, field) => {
+        const current = block.firstPatternIndex(target[field]);
+        if (current < 0 || (blockedPatternIndex >= 0 && current >= blockedPatternIndex)) return false;
+        blockedPatternIndex = current;
+        return blockedPatternIndex === 0;
+      });
+      blocked = blockedPatternIndex >= 0;
+    }
+    if (blocked) {
+      const error = new ApiError(400, 'Request content was filtered', 'content_filtered');
+      if (policyNamesByPattern) error.filterName = policyNamesByPattern[blockedPatternIndex];
+      throw error;
+    }
+  }
   if (masking.length === 0) return body;
 
   const mask = createMasker(masking);

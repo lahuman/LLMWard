@@ -51,3 +51,5 @@ curl -N http://localhost:3000/v1/chat/completions \
 출력 필터가 활성화된 SSE는 이벤트 구분자를 포함해 이벤트 하나당 1 MiB로 제한합니다. invalid JSON data event, 이 상한 초과 또는 필터 처리 실패는 fail-closed이며, 응답 헤더 전에는 HTTP 502 `filter_processing_failed`를 반환하고 헤더 전송 뒤에는 upstream을 중단하고 JSON 오류 본문 없이 연결을 종료합니다. 출력 필터가 없을 때의 byte-transparent relay에는 이 이벤트 상한을 적용하지 않습니다.
 
 오류 본문은 규칙 이름·ID, 패턴 또는 일치 내용을 포함하지 않습니다.
+
+`content_filtered` is the sole exception for a client-safe policy name: its standard HTTP 400 body includes `filter_name`. When multiple active policies match, it identifies the first matching policy in database ID order. The response does not disclose a pattern or matched content.

@@ -4,6 +4,7 @@
 
 - Added schema version 3 declarative literal content filters with global or model scope, input block/mask, and non-streaming or SSE output masking.
 - Added filter administration API/dashboard support with inactive defaults, fail-closed errors, privacy-preserving audit/request records, and provider-usage accounting on post-response failures.
+- Documented client-safe `filter_name` attribution for input blocks without disclosing patterns or matched content.
 
 ## 1.0.1 - 2026-08-09
 

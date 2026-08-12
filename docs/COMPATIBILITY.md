@@ -23,3 +23,5 @@ Streaming 공급자가 마지막 chunk에 usage를 포함하지 않으면 Gatewa
 입력 필터는 `messages[*].content` 문자열과 `{type:"text", text}` part만 검사합니다. 출력 필터는 비스트리밍 `choices[*].message.content`와 스트리밍 `choices[*].delta.content`만 검사합니다. 서로 다른 메시지나 part 경계는 넘지 않지만, 같은 choice의 연속 streaming content 경계는 넘겨 매칭합니다. `model`, `stream`, tool/function arguments, 이미지·오디오 part, `usage`와 vendor 확장 필드는 유지합니다.
 
 필터 패턴은 정규식이 아닌 Unicode 대소문자 비구분 리터럴 부분 문자열이며 치환문은 `[FILTERED]`로 고정됩니다. 임의 코드, 정규식, 외부 정책 서버는 지원하지 않습니다. 새 필터는 기본 비활성이며, 전체 적용이 아닌 필터에 모델 할당이 없으면 no-op입니다.
+
+`content_filtered` applies only after matching those supported input text fields. Its `filter_name` identifies the first matching active policy in database ID order; the response never includes a pattern or matched text.

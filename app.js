@@ -74,10 +74,15 @@ app.use((error, req, res, next) => {
   if (status === 429 && Number.isSafeInteger(error.retryAfter)) {
     res.setHeader('Retry-After', String(error.retryAfter));
   }
-  res.status(status).json({
+  const responseBody = {
     error: message,
     code: error.code || (status === 429 ? 'quota_exceeded' : status >= 500 ? 'internal_error' : 'invalid_request')
-  });
+  };
+  const filterName = typeof error.filterName === 'string' ? error.filterName.trim() : '';
+  if (status === 400 && error.code === 'content_filtered' && filterName) {
+    responseBody.filter_name = filterName;
+  }
+  res.status(status).json(responseBody);
 });
 
 module.exports = app;

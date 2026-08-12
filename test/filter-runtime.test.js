@@ -21,6 +21,7 @@ let providerServer;
 let baseUrl;
 let providerBaseUrl;
 let db;
+let applicationLogger;
 let contentFilters;
 let originalApplyOutputFilters;
 let usageService;
@@ -176,6 +177,7 @@ before(async () => {
   providerBaseUrl = `http://127.0.0.1:${providerServer.address().port}`;
 
   const app = require('../app');
+  applicationLogger = require('../logger');
   db = require('../db/database');
   contentFilters = require('../services/content-filters');
   originalApplyOutputFilters = contentFilters.applyOutputFilters;
@@ -294,9 +296,15 @@ test('active global and current-model filters form one snapshot while inactive a
   );
 });
 
-test('input blocking examines the original text before masking and records one zero-token filter failure', async () => {
+test('input blocking examines the original text before masking and records one zero-token filter failure', async (t) => {
   addFilter({ patterns: ['blocked secret'], inputAction: 'mask', global: true });
-  addFilter({ patterns: ['blocked secret'], inputAction: 'block', global: true });
+  addFilter({
+    name: 'Runtime input policy', patterns: ['blocked secret'], inputAction: 'block', global: true
+  });
+  const applicationLogs = [];
+  const captureLog = (info) => applicationLogs.push(info[Symbol.for('message')] ?? JSON.stringify(info));
+  applicationLogger.on('data', captureLog);
+  t.after(() => applicationLogger.off('data', captureLog));
 
   const response = await chat(primaryUser.token, {
     model: 'runtime-primary', messages: [{ role: 'user', content: 'BLOCKED SECRET' }]
@@ -304,13 +312,46 @@ test('input blocking examines the original text before masking and records one z
 
   assert.equal(response.status, 400);
   assert.equal(response.body.code, 'content_filtered');
-  assert.equal(JSON.stringify(response.body).includes('blocked secret'), false);
+  assert.equal(response.body.filter_name, 'Runtime input policy');
+  const serializedResponse = JSON.stringify(response.body).toLowerCase();
+  assert.equal(serializedResponse.includes('blocked secret'), false);
   assert.equal(providerCalls, 0);
   assert.deepEqual(requestLogs(), [{
     status: 'failure', error_type: 'filter', input_tokens: 0, output_tokens: 0, total_tokens: 0
   }]);
+  const serializedPersistedLogs = JSON.stringify({
+    request: db.prepare('SELECT * FROM request_logs ORDER BY id').all(),
+    audit: db.prepare('SELECT * FROM audit_logs ORDER BY id').all()
+  }).toLowerCase();
+  const serializedApplicationLogs = applicationLogs.join('\n').toLowerCase();
+  for (const sensitive of ['runtime input policy', 'blocked secret']) {
+    assert.equal(serializedPersistedLogs.includes(sensitive), false);
+    assert.equal(serializedApplicationLogs.includes(sensitive), false);
+  }
   assert.equal(db.prepare('SELECT COUNT(*) FROM usage_logs').pluck().get(), 0);
   assert.equal(db.prepare('SELECT COUNT(*) FROM quota_reservations').pluck().get(), 0);
+});
+
+test('non-400 content filter errors do not disclose policy names', async (t) => {
+  const originalApplyInputFilters = contentFilters.applyInputFilters;
+  contentFilters.applyInputFilters = () => {
+    const error = new Error('Private filter failure');
+    error.status = 500;
+    error.code = 'content_filtered';
+    error.filterName = 'Must not be disclosed';
+    throw error;
+  };
+  t.after(() => { contentFilters.applyInputFilters = originalApplyInputFilters; });
+
+  const response = await chat(primaryUser.token, {
+    model: 'runtime-primary', messages: [{ role: 'user', content: 'safe' }]
+  });
+
+  assert.equal(response.status, 500);
+  assert.equal(response.body.error, 'Internal server error');
+  assert.equal(response.body.code, 'content_filtered');
+  assert.equal(Object.hasOwn(response.body, 'filter_name'), false);
+  assert.equal(providerCalls, 0);
 });
 
 test('input masking changes only message text and preserves request extensions while max_tokens is clamped', async () => {

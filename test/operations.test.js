@@ -265,6 +265,17 @@ test('container artifacts use Node 22 and a single hardened gateway service', ()
   assert.doesNotMatch(compose, /^\s+(read_only|tmpfs):/m);
 });
 
+test('Docker installs native addon build prerequisites before production dependencies', () => {
+  const dockerfile = fs.readFileSync(path.join(repositoryRoot, 'Dockerfile'), 'utf8')
+    .replace(/\\\r?\n/g, ' ');
+  const buildTools = dockerfile.indexOf('apt-get install -y --no-install-recommends python3 make g++');
+  const productionDependencies = dockerfile.indexOf('npm ci --omit=dev');
+
+  assert.notEqual(buildTools, -1);
+  assert.equal(buildTools < productionDependencies, true);
+  assert.match(dockerfile, /rm -rf \/var\/lib\/apt\/lists\/\*/);
+});
+
 test('Docker build context excludes secrets, runtime data, and local artifacts', () => {
   const dockerfile = fs.readFileSync(path.join(repositoryRoot, 'Dockerfile'), 'utf8');
   assert.equal((dockerfile.match(/^COPY \. \.\s*$/gm) || []).length, 1);

@@ -22,3 +22,5 @@
 - 악성 공급자는 응답 본문으로 민감정보를 반환할 수 있습니다. 지정한 출력 리터럴과 대상 chat content 외의 값은 클라이언트에 전달되며 Gateway는 응답을 저장하지 않습니다.
 - 필터 패턴은 매칭을 위해 관리 API, SQLite와 백업에 평문으로 존재하고 과거 백업에는 수정·삭제 전 값도 남습니다. 실제 비밀, 프롬프트 또는 응답 예시를 패턴으로 등록하지 말고 DB·백업 접근과 보존을 제한해야 합니다.
 - 리터럴 content 필터는 범용 DLP가 아닙니다. 인코딩·변형된 값, tool/function arguments, 이미지·오디오와 기타 비대상 필드의 유출은 막지 못합니다.
+
+`filter_name` is response-only for `content_filtered` and is not persisted in request or application logs. Patterns and matched content remain undisclosed.

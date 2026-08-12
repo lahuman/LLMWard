@@ -252,3 +252,25 @@ test('dashboard exposes an accessible safe-DOM filter editor without rendering p
   assert.match(script, /function resetFilterForm\(focusName=false\).*if\(focusName\)form\.elements\.name\.focus\(\)/);
   assert.match(script, /filter-cancel'\)\.addEventListener\('click',\(\)=>resetFilterForm\(true\)\)/);
 });
+
+test('dashboard exposes client-safe policy attribution guidance for input blocks', () => {
+  const html = fs.readFileSync(path.join(__dirname, '..', 'public', 'admin-dashboard.html'), 'utf8');
+  assert.match(html, /<input[^>]+name="name"[^>]+aria-describedby="filter-name-help"/);
+  assert.match(html, /<p[^>]+id="filter-name-help"[^>]*>[\s\S]*?<code>filter_name<\/code>/);
+  const blockSectionMatch = html.match(/<section\b[^>]*\bid="filter-block-example"[^>]*>[\s\S]*?<\/section>/);
+  assert.ok(blockSectionMatch, 'input block example section must exist');
+  const blockExample = blockSectionMatch[0];
+  assert.match(blockExample, /aria-labelledby="filter-block-example-title"/);
+  assert.match(blockExample, /<h3[^>]+id="filter-block-example-title"[^>]*>Input block example<\/h3>/);
+  assert.match(blockExample, /[\w.+-]+@[\w.-]+\.test\b/i);
+  const responseMatch = blockExample.match(/<pre\b[^>]*>([\s\S]*?)<\/pre>/);
+  assert.ok(responseMatch, 'input block response example must exist');
+  const responseBody = JSON.parse(responseMatch[1].trim().replace(/^HTTP 400\s*/, ''));
+  assert.deepEqual(responseBody, {
+    error: 'Request content was filtered', code: 'content_filtered', filter_name: 'Example input policy'
+  });
+  assert.match(html, /no selected models[^<]*does not take effect/i);
+  assert.match(html, /documented chat text fields/i);
+  assert.match(html, /literal matching/i);
+  assert.match(html, /not a general DLP/i);
+});
