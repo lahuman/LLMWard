@@ -218,6 +218,17 @@ test('dashboard exposes an accessible safe-DOM filter editor without rendering p
   assert.match(html, /data-tab="filters"/);
   assert.match(html, /id="tab-filters"/);
   assert.match(html, /id="filter-form"/);
+  assert.match(html, /<section[^>]+id="filter-usage-guide"[^>]+aria-labelledby="filter-guide-title"/);
+  assert.match(html, /<h2[^>]+id="filter-guide-title"[^>]*>How filters work<\/h2>/);
+  assert.match(html, /<ol[^>]+class="filter-steps"/);
+  assert.match(html, /Block[^<]*<\/strong> rejects matching input with HTTP 400/);
+  assert.match(html, /Mask[^<]*<\/strong> replaces matching text with <code>\[FILTERED\]<\/code>/);
+  assert.match(html, /employee@example\.test/);
+  assert.match(html, /Contact <code>\[FILTERED\]<\/code>/);
+  assert.match(html, /literal substrings, not regular expressions/);
+  assert.match(html, /New filters are inactive by default/);
+  assert.match(html, /Global scope ignores model selection/);
+  assert.match(html, /Global scope ignores model selection\.<\/p>\s*<\/section>\s*<div class="card"><h2 id="filter-form-title">Create filter/);
   assert.match(html, /<textarea[^>]+name="patterns"[^>]+aria-describedby="filter-pattern-help"/);
   assert.match(html, /<select[^>]+name="modelIds"[^>]+multiple/);
   assert.match(html, /id="filter-cancel"/);

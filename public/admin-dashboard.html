@@ -32,6 +32,29 @@
         <div class="card"><h2>Providers</h2><div id="providers-content"></div></div>
       </section>
       <section id="tab-filters" class="hidden" role="tabpanel" aria-labelledby="tab-button-filters">
+        <section id="filter-usage-guide" class="card filter-guide" aria-labelledby="filter-guide-title">
+          <h2 id="filter-guide-title">How filters work</h2>
+          <ol class="filter-steps">
+            <li>Enter one case-insensitive literal pattern per line.</li>
+            <li>Choose an input action and, when needed, output masking.</li>
+            <li>Select global or model scope, review the rule, and then activate it.</li>
+          </ol>
+          <div class="filter-guide-grid">
+            <div>
+              <h3>Actions</h3>
+              <p><strong>Block</strong> rejects matching input with HTTP 400.</p>
+              <p><strong>Mask</strong> replaces matching text with <code>[FILTERED]</code>.</p>
+              <p><strong>None</strong> leaves that direction unchanged.</p>
+            </div>
+            <div>
+              <h3>Masking example</h3>
+              <p>Pattern: <code>employee@example.test</code></p>
+              <p>Before: <code>Contact employee@example.test</code></p>
+              <p>After: Contact <code>[FILTERED]</code></p>
+            </div>
+          </div>
+          <p class="help">Patterns are literal substrings, not regular expressions. They are stored in plaintext in SQLite and backups. New filters are inactive by default. Global scope ignores model selection.</p>
+        </section>
         <div class="card"><h2 id="filter-form-title">Create filter</h2><form id="filter-form"><input name="filterId" type="hidden"><div class="grid"><label>Name <input name="name" required maxlength="100"></label><label>Input action <select name="inputAction"><option value="">None</option><option value="block" selected>Block</option><option value="mask">Mask</option></select></label><label>Output action <select name="outputAction"><option value="">None</option><option value="mask">Mask</option></select></label><label>Models <select name="modelIds" multiple size="5"></select></label></div><label>Literal patterns (one per line) <textarea name="patterns" rows="7" required aria-describedby="filter-pattern-help"></textarea></label><p id="filter-pattern-help" class="help">Patterns are case-insensitive literals. They are stored in plaintext, so do not enter secrets, prompts, or response examples.</p><div class="checks"><label><input name="isGlobal" type="checkbox"> Apply globally</label><label><input name="isActive" type="checkbox"> Active</label></div><div class="actions"><button id="filter-submit" type="submit">Create filter</button><button id="filter-cancel" type="button" class="secondary hidden">Cancel edit</button></div></form></div>
         <div class="card"><h2>Filters</h2><div id="filters-content"></div></div>
       </section>
