@@ -221,7 +221,13 @@ test('dashboard exposes an accessible safe-DOM filter editor without rendering p
   assert.match(html, /<section[^>]+id="filter-usage-guide"[^>]+aria-labelledby="filter-guide-title"/);
   assert.match(html, /<h2[^>]+id="filter-guide-title"[^>]*>How filters work<\/h2>/);
   assert.match(html, /<ol[^>]+class="filter-steps"/);
+  assert.match(html, /<li>Enter one case-insensitive literal pattern per line\.<\/li>/);
+  assert.match(html, /<li>Choose an input action and, when needed, output masking\.<\/li>/);
+  assert.match(html, /<li>Select global or model scope, review the rule, and then activate it\.<\/li>/);
+  assert.match(html, /None[^<]*<\/strong> leaves that direction unchanged/);
+  assert.match(html, /<p>Before: <code>Contact employee@example\.test<\/code><\/p>/);
   assert.match(html, /Block[^<]*<\/strong> rejects matching input with HTTP 400/);
+  assert.match(html, /stored in plaintext in SQLite and backups/);
   assert.match(html, /Mask[^<]*<\/strong> replaces matching text with <code>\[FILTERED\]<\/code>/);
   assert.match(html, /employee@example\.test/);
   assert.match(html, /Contact <code>\[FILTERED\]<\/code>/);
