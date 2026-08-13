@@ -270,10 +270,20 @@ test('dashboard renders zero quotas as unlimited and explains zero while editing
     allowed_models: [],
     created_at: '2026-08-12T00:00:00.000Z',
   };
+  const positiveQuotaUser = {
+    id: 2,
+    username: 'limited-user',
+    is_active: true,
+    max_daily_input_tokens: 1234567,
+    max_daily_output_tokens: 7654321,
+    permissions_valid: true,
+    allowed_models: [],
+    created_at: '2026-08-12T00:00:00.000Z',
+  };
   const harness = createDashboardHarness({
     storedKey: 'stored-admin-key',
     fetchOverride(route) {
-      if (route === '/admin/users') return response([user]);
+      if (route === '/admin/users') return response([user, positiveQuotaUser]);
       return undefined;
     },
   });
@@ -284,7 +294,10 @@ test('dashboard renders zero quotas as unlimited and explains zero while editing
   };
   await settle();
 
-  assert.equal(collectText(harness.usersContent).filter((text) => text === 'Unlimited').length, 2);
+  const renderedText = collectText(harness.usersContent);
+  assert.equal(renderedText.filter((text) => text === 'Unlimited').length, 2);
+  assert.ok(renderedText.includes(new Intl.NumberFormat().format(1234567)));
+  assert.ok(renderedText.includes(new Intl.NumberFormat().format(7654321)));
   const edit = findButton(harness.usersContent, 'Edit');
   assert.ok(edit);
   edit.dispatchEvent(new Event('click'));
