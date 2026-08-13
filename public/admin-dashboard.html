@@ -89,9 +89,9 @@
           <label>Daily output quota (0 = unlimited) <input name="outputQuota" type="number" min="0" max="9007199254740991" step="1" value="0" required></label>
           <label>Allowed models (comma-separated; blank means all) <input name="allowedModels"></label>
         </div>
-        <div id="user-dialog-status" class="status hidden" role="status" aria-live="polite"></div>
         <div class="dialog-actions"><button id="user-submit" type="submit">Create user</button><button id="user-cancel" type="button" class="secondary">Cancel</button></div>
       </form>
+      <div id="user-dialog-status" class="status hidden" role="status" aria-live="polite"></div>
       <section id="user-token-result" class="hidden" aria-labelledby="user-token-title">
         <h3 id="user-token-title">One-time token</h3>
         <p>This token cannot be retrieved again. Store it securely before closing.</p>

@@ -171,7 +171,7 @@ function deferred() {
   return { promise, resolve };
 }
 
-function createDashboardHarness({ storedKey = '', fetchOverride, confirmResult = false } = {}) {
+function createDashboardHarness({ storedKey = '', fetchOverride, confirmResult = false, clipboardWrite } = {}) {
   const elements = new Map();
   const register = (id, item = new FakeNode()) => {
     elements.set(id, item);
@@ -294,7 +294,7 @@ function createDashboardHarness({ storedKey = '', fetchOverride, confirmResult =
     String,
     URLSearchParams,
     document,
-    navigator: { clipboard: { writeText: async (value) => clipboardWrites.push(value) } },
+    navigator: { clipboard: { writeText: clipboardWrite || (async (value) => clipboardWrites.push(value)) } },
     fetch: async (route, options = {}) => {
       requests.push({ route, options });
       const overridden = fetchOverride && fetchOverride(route, options);
@@ -346,6 +346,7 @@ function createDashboardHarness({ storedKey = '', fetchOverride, confirmResult =
     providerDialog: document.getElementById('provider-dialog'),
     confirmDialog: document.getElementById('confirm-dialog'),
     userCancel: document.getElementById('user-cancel'),
+    confirmCancel: document.getElementById('confirm-cancel'),
     modelCancel: document.getElementById('model-cancel'),
     providerCancel: document.getElementById('provider-cancel'),
     userTokenResult: document.getElementById('user-token-result'),
@@ -847,4 +848,153 @@ test('token rotation requires confirmation and reuses the one-time token result'
   assert.equal(oldRotate.focusCount, 0);
   assert.equal(newRotate.focusCount, 1);
   assert.equal(harness.confirmCount, 0);
+});
+
+test('pending user creation cannot be canceled reopened or submitted twice', async () => {
+  const mutation = deferred();
+  const token = 'only-valid-created-token';
+  const harness = createDashboardHarness({
+    storedKey: 'stored-admin-key',
+    fetchOverride(route, options) {
+      if (route === '/admin/users' && options.method === 'POST') return mutation.promise;
+      return undefined;
+    },
+  });
+  await settle();
+
+  harness.createUser.dispatchEvent(new Event('click'));
+  harness.userForm.elements.username.value = 'pending-user';
+  harness.userForm.dispatchEvent(new Event('submit', { cancelable: true }));
+  await settle();
+  assert.equal(harness.userSubmit.disabled, true);
+  assert.equal(harness.userCancel.disabled, true);
+
+  harness.userCancel.dispatchEvent(new Event('click'));
+  assert.equal(harness.userDialog.open, true);
+  harness.userDialog.cancel();
+  assert.equal(harness.userDialog.open, true);
+  harness.createUser.dispatchEvent(new Event('click'));
+  harness.userForm.dispatchEvent(new Event('submit', { cancelable: true }));
+  await settle();
+  assert.equal(harness.requests.filter(({ route, options }) => route === '/admin/users' && options.method === 'POST').length, 1);
+
+  mutation.resolve(response({ apiToken: token }));
+  await settle();
+
+  assert.equal(harness.userDialog.open, true);
+  assert.equal(harness.userTokenValue.textContent, token);
+  assert.equal(harness.userTokenResult.classList.contains('hidden'), false);
+  assert.equal(harness.userTokenClose.disabled, false);
+});
+
+test('pending token rotation cannot be canceled reopened or submitted twice', async () => {
+  const user = {
+    id: 27, username: 'pending-rotation-user', is_active: true,
+    max_daily_input_tokens: 0, max_daily_output_tokens: 0,
+    permissions_valid: true, allowed_models: [], created_at: '2026-08-13T00:00:00.000Z',
+  };
+  const mutation = deferred();
+  const token = 'only-valid-rotated-token';
+  const harness = createDashboardHarness({
+    storedKey: 'stored-admin-key',
+    fetchOverride(route, options) {
+      if (route === '/admin/users') return response([user]);
+      if (route === '/admin/users/27/rotate-token' && options.method === 'POST') return mutation.promise;
+      return undefined;
+    },
+  });
+  await settle();
+  const rotate = findButton(harness.usersContent, 'Rotate token');
+
+  rotate.dispatchEvent(new Event('click'));
+  harness.confirmForm.dispatchEvent(new Event('submit', { cancelable: true }));
+  await settle();
+  assert.equal(harness.confirmSubmit.disabled, true);
+  assert.equal(harness.confirmCancel.disabled, true);
+
+  harness.confirmCancel.dispatchEvent(new Event('click'));
+  assert.equal(harness.confirmDialog.open, true);
+  harness.confirmDialog.cancel();
+  assert.equal(harness.confirmDialog.open, true);
+  rotate.dispatchEvent(new Event('click'));
+  harness.confirmForm.dispatchEvent(new Event('submit', { cancelable: true }));
+  await settle();
+  assert.equal(harness.confirmDialog.showModalCount, 1);
+  assert.equal(harness.requests.filter(({ route, options }) => route === '/admin/users/27/rotate-token' && options.method === 'POST').length, 1);
+
+  mutation.resolve(response({ apiToken: token }));
+  await settle();
+
+  assert.equal(harness.confirmDialog.open, false);
+  assert.equal(harness.userDialog.open, true);
+  assert.equal(harness.userDialog.showModalCount, 1);
+  assert.equal(harness.userTokenValue.textContent, token);
+  assert.equal(harness.userTokenResult.classList.contains('hidden'), false);
+});
+
+test('token copy success feedback stays visible and announceable in result mode', async () => {
+  const html = fs.readFileSync(path.join(__dirname, '..', 'public', 'admin-dashboard.html'), 'utf8');
+  const dialog = html.slice(html.indexOf('<dialog id="user-dialog"'), html.indexOf('</dialog>', html.indexOf('<dialog id="user-dialog"')));
+  const formEnd = dialog.indexOf('</form>');
+  const statusPosition = dialog.indexOf('id="user-dialog-status"');
+  assert.ok(statusPosition > formEnd);
+  assert.match(dialog, /id="user-dialog-status"[^>]*role="status"[^>]*aria-live="polite"/u);
+
+  const token = 'copy-success-token';
+  const harness = createDashboardHarness({
+    storedKey: 'stored-admin-key',
+    fetchOverride(route, options) {
+      if (route === '/admin/users' && options.method === 'POST') return response({ apiToken: token });
+      return undefined;
+    },
+  });
+  await settle();
+  harness.createUser.dispatchEvent(new Event('click'));
+  harness.userForm.elements.username.value = 'copy-user';
+  harness.userForm.dispatchEvent(new Event('submit', { cancelable: true }));
+  await settle();
+  assert.equal(harness.userForm.classList.contains('hidden'), true);
+  assert.equal(harness.userTokenResult.classList.contains('hidden'), false);
+
+  harness.userTokenCopy.dispatchEvent(new Event('click'));
+  await settle();
+
+  assert.deepEqual(harness.clipboardWrites, [token]);
+  assert.equal(harness.userDialogStatus.textContent, 'Token copied.');
+  assert.equal(harness.userDialogStatus.className, 'status success');
+  assert.equal(harness.userDialogStatus.children.length, 0);
+});
+
+test('token copy rejection feedback stays visible and announceable in result mode', async () => {
+  const html = fs.readFileSync(path.join(__dirname, '..', 'public', 'admin-dashboard.html'), 'utf8');
+  const dialog = html.slice(html.indexOf('<dialog id="user-dialog"'), html.indexOf('</dialog>', html.indexOf('<dialog id="user-dialog"')));
+  const formEnd = dialog.indexOf('</form>');
+  const statusPosition = dialog.indexOf('id="user-dialog-status"');
+  assert.ok(statusPosition > formEnd);
+  assert.match(dialog, /id="user-dialog-status"[^>]*role="status"[^>]*aria-live="polite"/u);
+  const token = 'copy-failure-token';
+  const clipboardError = '<script>Clipboard denied</script>';
+  const harness = createDashboardHarness({
+    storedKey: 'stored-admin-key',
+    clipboardWrite: async () => { throw new Error(clipboardError); },
+    fetchOverride(route, options) {
+      if (route === '/admin/users' && options.method === 'POST') return response({ apiToken: token });
+      return undefined;
+    },
+  });
+  await settle();
+  harness.createUser.dispatchEvent(new Event('click'));
+  harness.userForm.elements.username.value = 'copy-failure-user';
+  harness.userForm.dispatchEvent(new Event('submit', { cancelable: true }));
+  await settle();
+  harness.userTokenCopy.dispatchEvent(new Event('click'));
+  await settle();
+
+  assert.equal(harness.userForm.classList.contains('hidden'), true);
+  assert.equal(harness.userTokenResult.classList.contains('hidden'), false);
+  assert.equal(harness.userTokenValue.textContent, token);
+  assert.equal(harness.userDialogStatus.textContent, clipboardError);
+  assert.equal(harness.userDialogStatus.className, 'status error');
+  assert.equal(harness.userDialogStatus.children.length, 0);
+  assert.equal(harness.status.textContent.includes(clipboardError), false);
 });
