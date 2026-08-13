@@ -1094,13 +1094,17 @@ test('stream idle timeout bounds downstream backpressure', async (t) => {
   t.after(() => { clearInterval(interval); });
 
   const closed = once(providerEvents, 'idle-backpressure:closed', { signal: AbortSignal.timeout(3000) });
+  const startedAt = Date.now();
   const response = await streamRequest();
   assert.equal(response.status, 200);
   const partial = await partialBodyUntilFailure(response);
+  const elapsed = Date.now() - startedAt;
   await closed;
 
   assert.ok(partial.length > 0);
   assert.equal(upstreamClosed, true);
+  assert.ok(elapsed >= 150, `expected backpressure idle timeout after 150 ms, got ${elapsed}`);
+  assert.ok(elapsed < 700, `expected backpressure idle timeout before 700 ms, got ${elapsed}`);
   await waitForReleasedResources();
   assert.deepEqual(requestLogs(), [timeoutFailureLog()]);
 });

@@ -1215,9 +1215,11 @@ async function assertProviderTimeoutLifecycle(t, model, stream) {
   );
   assert.equal(reservationCount(), 0);
   assert.deepEqual(db.prepare(`
-    SELECT status, error_type FROM request_logs
-    WHERE user_id = ? ORDER BY id DESC LIMIT 1
-  `).get(user.id), { status: 'failure', error_type: 'timeout' });
+    SELECT status, error_type, input_tokens, output_tokens FROM request_logs
+    WHERE user_id = ? ORDER BY id
+  `).all(user.id), [{
+    status: 'failure', error_type: 'timeout', input_tokens: 0, output_tokens: 0
+  }]);
   assert.equal(state().users[user.id], undefined);
   assert.equal(state().models[model], undefined);
   assert.equal(state().providers[providerId], undefined);
