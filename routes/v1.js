@@ -112,7 +112,11 @@ router.post('/chat/completions', validateToken, validateModelAccess, async (req,
     releaseLimit = acquire(req.user, req.gatewayModel);
     const filterSnapshot = contentFilters.getEffectiveFilterSnapshot(req.gatewayModel.model_id);
     const filteredBody = contentFilters.applyInputFilters(req.body, filterSnapshot);
-    reservation = reserveQuota(req.user, req.body.max_tokens, req.gatewayModel.max_tokens);
+    const streaming = req.body.stream === true;
+    const requestLifetimeMs = streaming
+      ? config.streamMaxDurationMs
+      : config.providerTimeoutMs;
+    reservation = reserveQuota(req.user, req.body.max_tokens, req.gatewayModel.max_tokens, requestLifetimeMs);
     const payload = { ...filteredBody, max_tokens: reservation.maxTokens };
     contentFilters.assertRequestSize(payload);
     const serializedPayload = JSON.stringify(payload);
@@ -131,7 +135,7 @@ router.post('/chat/completions', validateToken, validateModelAccess, async (req,
       throw new ApiError(502, `Provider returned status ${response.status}`, 'provider_http_error');
     }
 
-    if (req.body.stream === true) {
+    if (streaming) {
       let streamUsage;
       try {
         streamUsage = await relayStream(

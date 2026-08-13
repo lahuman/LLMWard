@@ -20,6 +20,7 @@ process.env.DATABASE_PATH = databasePath;
 process.env.LLMWARD_PROVIDER_TIMEOUT_MS = '3000';
 process.env.LOG_LEVEL = 'silent';
 
+const config = require('../config');
 let gatewayServer;
 let providerServer;
 let baseUrl;
@@ -1103,6 +1104,56 @@ test('abortInFlight aborts active requests and cleanup is idempotent', async (t)
   assert.equal(state().users[user.id], undefined);
   assert.equal(state().models['abort-in-flight'], undefined);
   assert.equal(state().providers[providerId], undefined);
+});
+
+async function assertReservationLifetime(stream, expectedMs, username) {
+  const user = await createUser(username, ['abort-in-flight']);
+  const started = once(providerEvents, 'abort-in-flight:started', { signal: AbortSignal.timeout(3000) });
+  const closed = once(providerEvents, 'abort-in-flight:closed', { signal: AbortSignal.timeout(3000) });
+  const before = Date.now();
+  const client = http.request(`${baseUrl}/v1/chat/completions`, {
+    method: 'POST', headers: { Authorization: `Bearer ${user.token}`, 'Content-Type': 'application/json' }
+  }, (response) => {
+    response.resume();
+  });
+  client.on('error', () => {});
+  client.end(JSON.stringify({
+    model: 'abort-in-flight', stream,
+    messages: [{ role: 'user', content: 'reservation-lifetime-test' }], max_tokens: 1
+  }));
+
+  try {
+    await started;
+    const after = Date.now();
+    const reservation = db.prepare(
+      'SELECT expires_at FROM quota_reservations WHERE user_id = ?'
+    ).get(user.id);
+    assert.ok(reservation);
+    const expiresAt = Date.parse(reservation.expires_at);
+    assert.ok(expiresAt >= before + expectedMs + 30000);
+    assert.ok(expiresAt <= after + expectedMs + 30000);
+  } finally {
+    client.destroy();
+    await closed;
+    const reservationCount = () => db.prepare(
+      'SELECT COUNT(*) AS count FROM quota_reservations WHERE user_id = ?'
+    ).get(user.id).count;
+    await waitFor(() => reservationCount() === 0, 'reservation lifetime cleanup did not finish');
+  }
+}
+
+test('chat reservation lifetime uses the selected request lifetime', async (t) => {
+  const providerTimeoutMs = config.providerTimeoutMs;
+  const streamMaxDurationMs = config.streamMaxDurationMs;
+  config.providerTimeoutMs = 5000;
+  config.streamMaxDurationMs = 15000;
+  t.after(() => {
+    config.providerTimeoutMs = providerTimeoutMs;
+    config.streamMaxDurationMs = streamMaxDurationMs;
+  });
+
+  await assertReservationLifetime(false, 5000, 'reservation-lifetime-non-streaming');
+  await assertReservationLifetime(true, 15000, 'reservation-lifetime-streaming');
 });
 
 test('online backup, retention, audit privacy, doctor, and Docker healthcheck are verifiable', async () => {

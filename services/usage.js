@@ -44,7 +44,10 @@ function runImmediate(work) {
   }
 }
 
-function reserveQuota(user, requestedMaxTokens, modelMaxTokens) {
+function reserveQuota(user, requestedMaxTokens, modelMaxTokens, requestLifetimeMs = config.providerTimeoutMs) {
+  if (!Number.isSafeInteger(requestLifetimeMs) || requestLifetimeMs <= 0) {
+    throw new ApiError(500, 'Request lifetime is invalid');
+  }
   if (!Number.isSafeInteger(modelMaxTokens) || modelMaxTokens <= 0) {
     throw new ApiError(500, 'Model token limit is invalid');
   }
@@ -88,7 +91,7 @@ function reserveQuota(user, requestedMaxTokens, modelMaxTokens) {
 
     const maxTokens = Math.min(requestedMaxTokens || modelMaxTokens, modelMaxTokens, remaining);
     const requestId = crypto.randomUUID();
-    const expiresAt = new Date(now.getTime() + config.providerTimeoutMs + 30000).toISOString();
+    const expiresAt = new Date(now.getTime() + requestLifetimeMs + 30000).toISOString();
     db.prepare(`
       INSERT INTO quota_reservations
         (request_id, user_id, request_date, output_tokens, expires_at)

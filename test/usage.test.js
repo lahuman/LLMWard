@@ -12,7 +12,7 @@ process.env.LOG_LEVEL = 'silent';
 
 const db = require('../db/database');
 require('../db/migrations').runMigrations();
-const { recordUsage, recordFailure } = require('../services/usage');
+const { reserveQuota, releaseReservation, recordUsage, recordFailure } = require('../services/usage');
 
 let fixtureId = 0;
 
@@ -58,6 +58,50 @@ function storedRows(fixture) {
       .get(fixture.requestId).count
   };
 }
+
+function createQuotaUser() {
+  fixtureId += 1;
+  const user = db.prepare(`
+    INSERT INTO users
+      (username, api_token, max_daily_input_tokens, max_daily_output_tokens)
+    VALUES (?, ?, 1000, 1000)
+  `).run(
+    `quota-user-${fixtureId}`,
+    `sha256:${crypto.randomBytes(32).toString('hex')}`
+  );
+  return db.prepare('SELECT * FROM users WHERE id = ?').get(user.lastInsertRowid);
+}
+
+test('reserveQuota uses the supplied request lifetime for reservation expiry', () => {
+  const user = createQuotaUser();
+  const lifetimeMs = 600000;
+  const before = Date.now();
+  const reservation = reserveQuota(user, 1, 4, lifetimeMs);
+  const after = Date.now();
+
+  try {
+    const row = db.prepare('SELECT expires_at FROM quota_reservations WHERE request_id = ?')
+      .get(reservation.requestId);
+    const expiresAt = Date.parse(row.expires_at);
+    assert.ok(expiresAt >= before + lifetimeMs + 30000);
+    assert.ok(expiresAt <= after + lifetimeMs + 30000);
+  } finally {
+    releaseReservation(reservation.requestId);
+  }
+});
+
+test('reserveQuota rejects an invalid request lifetime without a reservation', () => {
+  const user = createQuotaUser();
+
+  assert.throws(
+    () => reserveQuota(user, 1, 4, 0),
+    (error) => error.status === 500 && error.message === 'Request lifetime is invalid'
+  );
+  const reservations = db.prepare(
+    'SELECT COUNT(*) AS count FROM quota_reservations WHERE user_id = ?'
+  ).get(user.id).count;
+  assert.equal(reservations, 0);
+});
 
 test('recordUsage keeps the legacy success outcome when no result is supplied', () => {
   const fixture = createFixture();
