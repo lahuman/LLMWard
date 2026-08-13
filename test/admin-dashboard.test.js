@@ -10,18 +10,52 @@ class FakeNode extends EventTarget {
   constructor() {
     super();
     this.children = [];
-    this.className = '';
+    this.attributes = new Map();
+    this._className = '';
+    this._classes = new Set();
     this.dataset = {};
     this.style = {};
     this.textContent = '';
     this.value = '';
+    this.defaultValue = '';
     this.type = '';
     this.checked = false;
+    this.defaultChecked = false;
+    this.disabled = false;
+    this.selected = false;
+    this.focusCount = 0;
     this.classList = {
-      add() {},
-      remove() {},
-      toggle() {},
+      add: (...names) => this.updateClasses((classes) => names.forEach((name) => classes.add(name))),
+      remove: (...names) => this.updateClasses((classes) => names.forEach((name) => classes.delete(name))),
+      toggle: (name, force) => {
+        const enabled = force === undefined ? !this._classes.has(name) : Boolean(force);
+        this.updateClasses((classes) => enabled ? classes.add(name) : classes.delete(name));
+        return enabled;
+      },
+      contains: (name) => this._classes.has(name),
     };
+  }
+
+  get className() {
+    return this._className;
+  }
+
+  set className(value) {
+    this._className = String(value);
+    this._classes = new Set(this._className.split(/\s+/u).filter(Boolean));
+  }
+
+  get options() {
+    return this.children;
+  }
+
+  get selectedOptions() {
+    return this.children.filter((child) => child.selected);
+  }
+
+  updateClasses(change) {
+    change(this._classes);
+    this._className = [...this._classes].join(' ');
   }
 
   append(...children) {
@@ -32,7 +66,43 @@ class FakeNode extends EventTarget {
     this.children = children;
   }
 
-  setAttribute() {}
+  setAttribute(name, value) {
+    this.attributes.set(name, String(value));
+  }
+
+  getAttribute(name) {
+    return this.attributes.get(name) ?? null;
+  }
+
+  focus() {
+    this.focusCount += 1;
+  }
+}
+
+class FakeDialog extends FakeNode {
+  constructor() {
+    super();
+    this.open = false;
+    this.showModalCount = 0;
+  }
+
+  showModal() {
+    if (this.open) throw new Error('Dialog is already open');
+    this.open = true;
+    this.showModalCount += 1;
+  }
+
+  close() {
+    if (!this.open) return;
+    this.open = false;
+    this.dispatchEvent(new Event('close'));
+  }
+
+  cancel() {
+    const event = new Event('cancel', { cancelable: true });
+    this.dispatchEvent(event);
+    if (!event.defaultPrevented) this.close();
+  }
 }
 
 class FakeForm extends FakeNode {
@@ -45,19 +115,45 @@ class FakeForm extends FakeNode {
 
   reset() {
     this.resetCount += 1;
+    for (const control of Object.values(this.elements)) {
+      if (!control || Array.isArray(control)) continue;
+      control.value = control.defaultValue;
+      control.checked = control.defaultChecked;
+      for (const option of control.options || []) option.selected = option.defaultSelected || false;
+    }
   }
 }
 
 class FakeFormData {
   constructor(form) {
+    this.form = form;
     this.values = form.values;
   }
 
   get(name) {
+    const control = this.form.elements && this.form.elements[name];
+    if (control) {
+      if (control.disabled) return null;
+      if (control.type === 'checkbox') return control.checked ? control.value || 'on' : null;
+      if (control.multiple) {
+        const selected = Array.from(control.selectedOptions || []);
+        if (control.multiple) return selected.length ? selected[0].value : null;
+      }
+      return control.value;
+    }
     return this.values[name] ?? null;
   }
 
   getAll(name) {
+    const control = this.form.elements && this.form.elements[name];
+    if (control) {
+      if (control.disabled) return [];
+      if (control.type === 'checkbox') return control.checked ? [control.value || 'on'] : [];
+      if (control.multiple) {
+        return Array.from(control.selectedOptions || [], (option) => option.value);
+      }
+      return [control.value];
+    }
     const value = this.get(name);
     return Array.isArray(value) ? value : value === null ? [] : [value];
   }
@@ -77,22 +173,58 @@ function deferred() {
 
 function createDashboardHarness({ storedKey = '', fetchOverride } = {}) {
   const elements = new Map();
-  const providerForm = new FakeForm({
-    providerName: 'local',
-    displayName: 'Local provider',
-    baseUrl: 'http://127.0.0.1:8080',
-    authType: 'none',
-    envName: '',
-    storedKey: '',
-  });
-  providerForm.elements.preset = new FakeNode();
-  const modelForm = new FakeForm();
-  modelForm.elements.providerId = new FakeNode();
+  const register = (id, item = new FakeNode()) => {
+    elements.set(id, item);
+    return item;
+  };
+  const control = (form, name, { value = '', type = '', checked = false, ...properties } = {}) => {
+    const item = Object.assign(new FakeNode(), properties);
+    item.value = String(value);
+    item.defaultValue = String(value);
+    item.type = type;
+    item.checked = checked;
+    item.defaultChecked = checked;
+    form.elements[name] = item;
+    register(name, item);
+    return item;
+  };
+  const userForm = register('user-form', new FakeForm());
+  control(userForm, 'userId');
+  control(userForm, 'username');
+  control(userForm, 'inputQuota', { value: '0', type: 'number' });
+  control(userForm, 'outputQuota', { value: '0', type: 'number' });
+  control(userForm, 'allowedModels');
+  const modelForm = register('model-form', new FakeForm());
+  control(modelForm, 'modelId');
+  control(modelForm, 'modelName');
+  control(modelForm, 'displayName');
+  control(modelForm, 'providerId');
+  control(modelForm, 'maxTokens', { value: '4096', type: 'number' });
+  control(modelForm, 'inputPrice', { type: 'number' });
+  control(modelForm, 'outputPrice', { type: 'number' });
+  control(modelForm, 'contextWindow', { type: 'number' });
+  control(modelForm, 'defaultTemperature', { type: 'number' });
+  control(modelForm, 'defaultTopP', { type: 'number' });
+  control(modelForm, 'defaultPresencePenalty', { type: 'number' });
+  control(modelForm, 'defaultFrequencyPenalty', { type: 'number' });
+  control(modelForm, 'defaultSeed', { type: 'number' });
+  const providerForm = register('provider-form', new FakeForm());
+  control(providerForm, 'providerId');
+  control(providerForm, 'preset');
+  control(providerForm, 'providerName');
+  control(providerForm, 'displayName');
+  control(providerForm, 'baseUrl');
+  control(providerForm, 'authType', { value: 'none' });
+  control(providerForm, 'envName');
+  control(providerForm, 'storedKey', { type: 'password' });
+  control(providerForm, 'removeStoredKey', { type: 'checkbox' });
   const filterForm = new FakeForm();
-  filterForm.elements.modelIds = { selectedOptions: [], replaceChildren() {} };
+  filterForm.elements.modelIds = Object.assign(new FakeNode(), { multiple: true });
   filterForm.elements.isGlobal = new FakeNode();
   const statsForm = new FakeForm({ range: '24h', start: '', end: '' });
   const requests = [];
+  const clipboardWrites = [];
+  let confirmCount = 0;
   const builtInPiiForm = new FakeForm();
   builtInPiiForm.elements.isActive = new FakeNode();
   let builtInPiiActive = false;
@@ -120,16 +252,30 @@ function createDashboardHarness({ storedKey = '', fetchOverride } = {}) {
       return node;
     },
   };
-  elements.set('provider-form', providerForm);
+  for (const id of ['user-dialog', 'model-dialog', 'provider-dialog', 'confirm-dialog']) register(id, new FakeDialog());
+  register('confirm-form', new FakeForm());
+  for (const id of [
+    'create-user', 'create-model', 'create-provider',
+    'user-cancel', 'model-cancel', 'provider-cancel',
+    'user-submit', 'model-submit', 'provider-submit',
+    'user-token-copy', 'user-token-close', 'confirm-submit', 'confirm-cancel',
+  ]) {
+    register(id).type = 'button';
+  }
+  for (const id of [
+    'user-dialog-title', 'user-dialog-description', 'user-dialog-status', 'user-token-result', 'user-token-value',
+    'model-dialog-title', 'model-dialog-description', 'model-dialog-status', 'model-advanced',
+    'provider-dialog-title', 'provider-dialog-description', 'provider-dialog-status',
+    'provider-preset-field', 'provider-env-field',
+    'confirm-title', 'confirm-message', 'confirm-dialog-status',
+  ]) register(id);
   elements.set('built-in-pii-form', builtInPiiForm);
   elements.set('built-in-pii-rules', new FakeNode());
   elements.set('built-in-pii-state', new FakeNode());
-  elements.set('model-form', modelForm);
   elements.set('filter-form', filterForm);
   elements.set('stats-form', statsForm);
   const loginForm = new FakeForm();
   elements.set('login-form', loginForm);
-  elements.set('user-form', new FakeForm());
   const context = {
     Array,
     Date,
@@ -146,6 +292,7 @@ function createDashboardHarness({ storedKey = '', fetchOverride } = {}) {
     String,
     URLSearchParams,
     document,
+    navigator: { clipboard: { writeText: async (value) => clipboardWrites.push(value) } },
     fetch: async (route, options = {}) => {
       requests.push({ route, options });
       const overridden = fetchOverride && fetchOverride(route, options);
@@ -167,13 +314,15 @@ function createDashboardHarness({ storedKey = '', fetchOverride } = {}) {
     sessionStorage: { getItem: () => storedKey, setItem() {}, removeItem() {} },
     window: new FakeNode(),
   };
-  context.window.prompt = () => null;
-  context.window.confirm = () => false;
+  context.window.prompt = () => { throw new Error('Resource flows must not call window.prompt'); };
+  context.window.confirm = () => { confirmCount += 1; return false; };
   context.window.addEventListener = () => {};
   vm.runInNewContext(fs.readFileSync(path.join(__dirname, '..', 'public', 'admin-dashboard.js'), 'utf8'), context);
   return {
     adminKey: document.getElementById('admin-key'),
     loginForm,
+    userForm,
+    modelForm,
     providerForm,
     requests,
     status: document.getElementById('status'),
@@ -183,6 +332,18 @@ function createDashboardHarness({ storedKey = '', fetchOverride } = {}) {
     builtInPiiState: document.getElementById('built-in-pii-state'),
 
     usersContent: document.getElementById('users-content'),
+    createUser: document.getElementById('create-user'),
+    createModel: document.getElementById('create-model'),
+    createProvider: document.getElementById('create-provider'),
+    userDialog: document.getElementById('user-dialog'),
+    modelDialog: document.getElementById('model-dialog'),
+    providerDialog: document.getElementById('provider-dialog'),
+    confirmDialog: document.getElementById('confirm-dialog'),
+    userCancel: document.getElementById('user-cancel'),
+    modelCancel: document.getElementById('model-cancel'),
+    providerCancel: document.getElementById('provider-cancel'),
+    clipboardWrites,
+    get confirmCount() { return confirmCount; },
     window: context.window,
   };
 }
@@ -207,6 +368,67 @@ async function settle() {
 test('filters tab keeps the built-in PII filter before its sibling usage guide', () => {
   const html = fs.readFileSync(path.join(__dirname, '..', 'public', 'admin-dashboard.html'), 'utf8');
   assert.match(html, /<section id="tab-filters"[^>]*>\s*<section id="built-in-pii-filter"[\s\S]*?<\/section>\s*<section id="filter-usage-guide"/);
+});
+
+test('dashboard exposes labelled native resource and confirmation dialogs', () => {
+  const html = fs.readFileSync(path.join(__dirname, '..', 'public', 'admin-dashboard.html'), 'utf8');
+  assert.equal((html.match(/<dialog\b/gu) || []).length, 4);
+  for (const resource of ['user', 'model', 'provider']) {
+    assert.match(html, new RegExp(`<dialog id="${resource}-dialog"[^>]*aria-labelledby="${resource}-dialog-title"[^>]*aria-describedby="${resource}-dialog-description"`));
+    assert.match(html, new RegExp(`id="${resource}-dialog-status"[^>]*role="status"[^>]*aria-live="polite"`));
+    assert.match(html, new RegExp(`id="create-${resource}"`));
+  }
+  assert.match(html, /<dialog id="confirm-dialog"[^>]*aria-labelledby="confirm-title"[^>]*aria-describedby="confirm-message"/);
+  assert.match(html, /id="confirm-dialog-status"[^>]*role="status"[^>]*aria-live="polite"/);
+  for (const resource of ['user', 'model', 'provider']) {
+    const section = html.match(new RegExp(`<section id="tab-${resource}s"[\\s\\S]*?(?=<section id="tab-|<\/div>\\s*<\/main>)`));
+    assert.ok(section);
+    assert.doesNotMatch(section[0], new RegExp(`<form id="${resource}-form"`));
+    assert.doesNotMatch(section[0], new RegExp(`<h2>Create ${resource}`));
+  }
+});
+
+test('create dialogs reset forms focus the first control and restore focus on cancel or Escape', () => {
+  const harness = createDashboardHarness();
+  harness.userForm.elements.username.value = 'stale-user';
+  harness.createUser.dispatchEvent(new Event('click'));
+  assert.equal(harness.userDialog.showModalCount, 1);
+  assert.equal(harness.userForm.elements.userId.value, '');
+  assert.equal(harness.userForm.elements.username.value, '');
+  assert.equal(harness.userForm.elements.username.focusCount, 1);
+  harness.userCancel.dispatchEvent(new Event('click'));
+  assert.equal(harness.userDialog.open, false);
+  assert.equal(harness.createUser.focusCount, 1);
+
+  harness.modelForm.elements.modelName.value = 'stale-model';
+  harness.createModel.dispatchEvent(new Event('click'));
+  assert.equal(harness.modelDialog.showModalCount, 1);
+  assert.equal(harness.modelForm.elements.modelId.value, '');
+  assert.equal(harness.modelForm.elements.modelName.value, '');
+  assert.equal(harness.modelForm.elements.modelName.focusCount, 1);
+  harness.modelDialog.cancel();
+  assert.equal(harness.modelDialog.open, false);
+  assert.equal(harness.createModel.focusCount, 1);
+
+  harness.providerForm.elements.preset.value = 'stale-preset';
+  harness.createProvider.dispatchEvent(new Event('click'));
+  assert.equal(harness.providerDialog.showModalCount, 1);
+  assert.equal(harness.providerForm.elements.providerId.value, '');
+  assert.equal(harness.providerForm.elements.preset.value, '');
+  assert.equal(harness.providerForm.elements.preset.focusCount, 1);
+  harness.providerCancel.dispatchEvent(new Event('click'));
+  assert.equal(harness.createProvider.focusCount, 1);
+  assert.equal(harness.confirmCount, 0);
+});
+
+test('backdrop clicks do not discard resource forms', () => {
+  const harness = createDashboardHarness();
+  harness.createProvider.dispatchEvent(new Event('click'));
+  harness.providerForm.elements.baseUrl.value = 'https://provider.example/v1';
+  harness.providerDialog.dispatchEvent(new Event('click'));
+  assert.equal(harness.providerDialog.open, true);
+  assert.equal(harness.providerForm.elements.baseUrl.value, 'https://provider.example/v1');
+  assert.equal(harness.confirmCount, 0);
 });
 
 test('built-in PII filter saves its active state and renders rules as safe list items', async () => {

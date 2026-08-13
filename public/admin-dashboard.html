@@ -20,16 +20,13 @@
       </nav>
       <section id="onboarding" class="card hidden"><h2>First-time setup</h2><div id="onboarding-content"></div></section>
       <section id="tab-users">
-        <div class="card"><h2>Create user</h2><form id="user-form"><div class="grid"><label>Username <input name="username" required maxlength="200"></label><label>Daily input quota (0 = unlimited) <input name="inputQuota" type="number" min="0" value="0" required></label><label>Daily output quota (0 = unlimited) <input name="outputQuota" type="number" min="0" value="0" required></label><label>Allowed models (comma-separated; blank means all) <input name="allowedModels"></label></div><div><button type="submit">Create user</button></div></form><div id="new-token" class="hidden"><p>This token is shown once. Store it securely.</p><pre id="new-token-value"></pre></div></div>
-        <div class="card"><h2>Users</h2><div id="users-content"></div></div>
+        <div class="card"><div class="section-heading"><h2>Users</h2><button id="create-user" type="button">Create user</button></div><div id="users-content"></div></div>
       </section>
       <section id="tab-models" class="hidden">
-        <div class="card"><h2>Create model</h2><form id="model-form"><div class="grid"><label>Identifier <input name="modelName" required></label><label>Display name <input name="displayName" required></label><label>Provider <select name="providerId" required></select></label><label>Maximum output tokens <input name="maxTokens" type="number" min="1" value="4096" required></label><label>Input USD / 1M tokens <input name="inputPrice" type="number" min="0" step="any" placeholder="Not configured"></label><label>Output USD / 1M tokens <input name="outputPrice" type="number" min="0" step="any" placeholder="Not configured"></label></div><div><button type="submit">Create model</button></div></form></div>
-        <div class="card"><h2>Models</h2><div id="models-content"></div></div>
+        <div class="card"><div class="section-heading"><h2>Models</h2><button id="create-model" type="button">Create model</button></div><div id="models-content"></div></div>
       </section>
       <section id="tab-providers" class="hidden">
-        <div class="card"><h2>Create provider</h2><form id="provider-form"><div class="grid"><label>Preset <select name="preset"><option value="">Custom</option></select></label><label>Identifier <input name="providerName" required></label><label>Display name <input name="displayName" required></label><label>Base URL <input name="baseUrl" type="url" required placeholder="https://provider.example/v1"></label><label>Authentication <select name="authType"><option value="none">None</option><option value="api_key">API key</option><option value="bearer_token">Bearer token</option></select></label><label>Credential environment variable <input name="envName" placeholder="PROVIDER_API_KEY"></label><label>Stored credential (optional) <input name="storedKey" type="password" autocomplete="new-password"></label></div><div><button type="submit">Create provider</button></div></form></div>
-        <div class="card"><h2>Providers</h2><div id="providers-content"></div></div>
+        <div class="card"><div class="section-heading"><h2>Providers</h2><button id="create-provider" type="button">Create provider</button></div><div id="providers-content"></div></div>
       </section>
       <section id="tab-filters" class="hidden" role="tabpanel" aria-labelledby="tab-button-filters">
         <section id="built-in-pii-filter" class="card" aria-labelledby="built-in-pii-title">
@@ -81,6 +78,84 @@
         <div class="card"><h2>Recent requests (up to 100)</h2><div id="request-content"></div></div>
       </section>
     </div>
+    <dialog id="user-dialog" aria-labelledby="user-dialog-title" aria-describedby="user-dialog-description">
+      <h2 id="user-dialog-title">Create user</h2>
+      <p id="user-dialog-description" class="help">Create or edit gateway access and daily quotas.</p>
+      <form id="user-form">
+        <input name="userId" type="hidden">
+        <div class="grid">
+          <label>Username <input name="username" required maxlength="200"></label>
+          <label>Daily input quota (0 = unlimited) <input name="inputQuota" type="number" min="0" step="1" value="0" required></label>
+          <label>Daily output quota (0 = unlimited) <input name="outputQuota" type="number" min="0" step="1" value="0" required></label>
+          <label>Allowed models (comma-separated; blank means all) <input name="allowedModels"></label>
+        </div>
+        <div id="user-dialog-status" class="status hidden" role="status" aria-live="polite"></div>
+        <div class="dialog-actions"><button id="user-submit" type="submit">Create user</button><button id="user-cancel" type="button" class="secondary">Cancel</button></div>
+      </form>
+      <section id="user-token-result" class="hidden" aria-labelledby="user-token-title">
+        <h3 id="user-token-title">One-time token</h3>
+        <p>This token cannot be retrieved again. Store it securely before closing.</p>
+        <pre id="user-token-value"></pre>
+        <div class="dialog-actions"><button id="user-token-copy" type="button">Copy token</button><button id="user-token-close" type="button" class="secondary">Close</button></div>
+      </section>
+    </dialog>
+    <dialog id="model-dialog" aria-labelledby="model-dialog-title" aria-describedby="model-dialog-description">
+      <h2 id="model-dialog-title">Create model</h2>
+      <p id="model-dialog-description" class="help">Register model routing, capacity metadata, and optional generation defaults.</p>
+      <form id="model-form">
+        <input name="modelId" type="hidden">
+        <div class="grid">
+          <label>Identifier <input name="modelName" required></label>
+          <label>Display name <input name="displayName" required></label>
+          <label>Provider <select name="providerId" required></select></label>
+          <label>Maximum output tokens <input name="maxTokens" type="number" min="1" step="1" value="4096" required></label>
+          <label>Context window (tokens) <input name="contextWindow" type="number" min="1" max="9007199254740991" step="1" placeholder="Not configured" aria-describedby="context-window-help"></label>
+          <label>Input USD / 1M tokens <input name="inputPrice" type="number" min="0" step="any" placeholder="Not configured"></label>
+          <label>Output USD / 1M tokens <input name="outputPrice" type="number" min="0" step="any" placeholder="Not configured"></label>
+        </div>
+        <p id="context-window-help" class="help">This records the provider's effective context limit; it does not reconfigure the provider.</p>
+        <details id="model-advanced">
+          <summary>Advanced generation defaults</summary>
+          <p id="model-defaults-help" class="help">A default applies only when the client omits that field. Client-owned fields always win.</p>
+          <div class="grid">
+            <label>Temperature <input name="defaultTemperature" type="number" min="0" max="2" step="any" placeholder="Provider default" aria-describedby="model-defaults-help"></label>
+            <label>Top P <input name="defaultTopP" type="number" min="0" max="1" step="any" placeholder="Provider default" aria-describedby="model-defaults-help"></label>
+            <label>Presence penalty <input name="defaultPresencePenalty" type="number" min="-2" max="2" step="any" placeholder="Provider default" aria-describedby="model-defaults-help"></label>
+            <label>Frequency penalty <input name="defaultFrequencyPenalty" type="number" min="-2" max="2" step="any" placeholder="Provider default" aria-describedby="model-defaults-help"></label>
+            <label>Seed <input name="defaultSeed" type="number" min="-9007199254740991" max="9007199254740991" step="1" placeholder="Provider default" aria-describedby="model-defaults-help"></label>
+          </div>
+        </details>
+        <div id="model-dialog-status" class="status hidden" role="status" aria-live="polite"></div>
+        <div class="dialog-actions"><button id="model-submit" type="submit">Create model</button><button id="model-cancel" type="button" class="secondary">Cancel</button></div>
+      </form>
+    </dialog>
+    <dialog id="provider-dialog" aria-labelledby="provider-dialog-title" aria-describedby="provider-dialog-description">
+      <h2 id="provider-dialog-title">Create provider</h2>
+      <p id="provider-dialog-description" class="help">Register an approved provider URL and its authentication settings.</p>
+      <form id="provider-form">
+        <input name="providerId" type="hidden">
+        <div class="grid">
+          <label id="provider-preset-field">Preset <select name="preset"><option value="">Custom</option></select></label>
+          <label>Identifier <input name="providerName" required></label>
+          <label>Display name <input name="displayName" required></label>
+          <label>Base URL <input name="baseUrl" type="url" required placeholder="https://provider.example/v1"></label>
+          <label>Authentication <select name="authType"><option value="none">None</option><option value="api_key">API key</option><option value="bearer_token">Bearer token</option></select></label>
+          <label id="provider-env-field">Credential environment variable <input name="envName" placeholder="PROVIDER_API_KEY"></label>
+          <label>Stored credential (optional) <input name="storedKey" type="password" autocomplete="new-password"></label>
+          <label><input name="removeStoredKey" type="checkbox"> Remove saved credential</label>
+        </div>
+        <div id="provider-dialog-status" class="status hidden" role="status" aria-live="polite"></div>
+        <div class="dialog-actions"><button id="provider-submit" type="submit">Create provider</button><button id="provider-cancel" type="button" class="secondary">Cancel</button></div>
+      </form>
+    </dialog>
+    <dialog id="confirm-dialog" aria-labelledby="confirm-title" aria-describedby="confirm-message">
+      <h2 id="confirm-title">Confirm action</h2>
+      <p id="confirm-message"></p>
+      <form id="confirm-form">
+        <div id="confirm-dialog-status" class="status hidden" role="status" aria-live="polite"></div>
+        <div class="dialog-actions"><button id="confirm-submit" type="submit">Confirm</button><button id="confirm-cancel" type="button" class="secondary">Cancel</button></div>
+      </form>
+    </dialog>
   </main>
   <script src="/admin-dashboard.js"></script>
 </body>
