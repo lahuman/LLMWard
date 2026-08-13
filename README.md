@@ -70,6 +70,22 @@ Compose는 Gateway 한 서비스만 실행합니다. PostgreSQL, MySQL, Redis는
 
 콘텐츠 필터 패턴은 매칭을 위해 관리 API, SQLite와 백업에 평문으로 존재합니다. 실제 비밀, 프롬프트 또는 응답 예시를 패턴으로 등록하지 마십시오.
 
+### 모델 응답 timeout
+
+LLMWard는 다음 millisecond 단위 설정을 사용합니다.
+
+- `LLMWARD_PROVIDER_TIMEOUT_MS=60000`: 비스트리밍 전체 응답 또는 스트리밍 upstream 응답 헤더 대기
+- `LLMWARD_STREAM_IDLE_TIMEOUT_MS=120000`: 스트리밍 응답 헤더 이후 raw upstream body chunk 사이의 최대 무응답 시간
+- `LLMWARD_STREAM_MAX_DURATION_MS=1800000`: upstream 요청 시작부터 스트림 종료까지의 절대 상한
+
+진행 중인 스트림은 raw upstream body chunk를 받을 때마다 idle timeout을 갱신하지만 절대 상한은 갱신하지 않습니다. downstream backpressure로 LLMWard가 upstream을 더 읽지 못하는 동안에도 idle timeout은 계속 적용됩니다.
+
+Timeout이 클라이언트에 SSE 응답 헤더를 보내기 전에 발생하면 HTTP 504 `provider_timeout`을 반환합니다. 이미 SSE 헤더를 보냈다면 JSON 또는 SSE 오류를 추가하지 않고 연결을 종료합니다.
+
+기존 설치의 다른 제품명 접두사 timeout 설정은 읽지 않습니다. 기존 `.env`를 세 LLMWard 설정으로 직접 변경한 뒤 프로세스를 다시 시작하거나 컨테이너를 다시 생성해야 합니다. Compose의 `env_file` 변경은 `docker compose restart`로 다시 읽히지 않으므로 `docker compose up -d --force-recreate gateway`를 사용합니다.
+
+reverse proxy의 read/idle timeout은 `LLMWARD_STREAM_IDLE_TIMEOUT_MS`보다 길어야 하며 기본 설정에서는 180초 이상을 권장합니다. 절대 연결 제한은 `LLMWARD_STREAM_MAX_DURATION_MS`보다 길게 설정하거나 이 경로에서 비활성화하고, SSE buffering은 비활성화하십시오.
+
 ## 공급자와 모델
 
 Generic OpenAI-compatible, Ollama, vLLM, LM Studio, llama.cpp server, LocalAI, NVIDIA NIM 프리셋을 제공합니다. 프리셋은 URL과 설명일 뿐 별도 SDK가 아닙니다. `/models` 검색 결과는 DB를 변경하지 않으며 관리자가 확인한 모델 하나만 명시적으로 등록됩니다.

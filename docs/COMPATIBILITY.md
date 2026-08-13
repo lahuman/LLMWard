@@ -9,10 +9,12 @@
 | 선언형 콘텐츠 필터 | 지원 | 전체 또는 모델별 입력 `block`/`mask`, 비스트리밍·SSE 출력 `mask` |
 | `usage` | 지원 | `prompt_tokens`, `completion_tokens`; 없으면 0 |
 | 공급자 오류 | 안전 변환 | 상태/분류만 기록, 오류 본문 미저장 |
-| Timeout | 지원 | 504와 upstream 취소 |
+| Timeout | 지원 | 비스트리밍 전체 응답과 streaming upstream 응답 헤더 대기는 `LLMWARD_PROVIDER_TIMEOUT_MS`, 진행 중 stream은 `LLMWARD_STREAM_IDLE_TIMEOUT_MS`·`LLMWARD_STREAM_MAX_DURATION_MS` 적용(기본 60초/2분/30분); 클라이언트 응답 헤더 전 timeout은 504 `provider_timeout`, 이후에는 연결 종료 |
 | Client disconnect | 지원 | upstream 취소, 예약/동시성 슬롯 해제 |
 | 예상하지 못한 redirect | 거부 | 자동 추적하지 않음 |
 | Responses/Realtime/Claude/Gemini 변환 | 미지원 | 지원한다고 가장하지 않음 |
+
+Streaming idle은 완성된 SSE event나 downstream write가 아니라 출력 필터 처리 전의 raw upstream body chunk 수신을 기준으로 갱신합니다. 따라서 필터가 event를 조립하는 동안에도 upstream bytes가 계속 도착하면 활성 상태로 취급합니다. downstream backpressure로 upstream 읽기가 중단된 동안에는 idle timeout이 계속 적용됩니다.
 
 Streaming 공급자가 마지막 chunk에 usage를 포함하지 않으면 Gateway는 토큰 수를 0으로 기록합니다. 자체 tokenizer를 포함하지 않는 의도적인 제한입니다.
 
