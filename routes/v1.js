@@ -9,6 +9,7 @@ const { buildProviderEndpoint, getAuthHeaders, getActiveModelsWithProviders } = 
 const { ApiError } = require('../services/errors');
 const { acquire } = require('../services/limits');
 const contentFilters = require('../services/content-filters');
+const piiFilter = require('../services/pii-filter');
 
 const router = express.Router();
 const activeControllers = new Set();
@@ -98,6 +99,7 @@ router.post('/chat/completions', validateToken, validateModelAccess, async (req,
   let timeout;
   let clientDisconnected = false;
   let requestFinalized = false;
+  let piiContext = null;
   const startedAt = Date.now();
   const controller = new AbortController();
   activeControllers.add(controller);
@@ -111,7 +113,12 @@ router.post('/chat/completions', validateToken, validateModelAccess, async (req,
   try {
     releaseLimit = acquire(req.user, req.gatewayModel);
     const filterSnapshot = contentFilters.getEffectiveFilterSnapshot(req.gatewayModel.model_id);
-    const filteredBody = contentFilters.applyInputFilters(req.body, filterSnapshot);
+    let filteredBody = contentFilters.applyInputFilters(req.body, filterSnapshot);
+    if (filterSnapshot.built_in_pii_filter_active) {
+      const transformed = piiFilter.applyInputFilter(filteredBody);
+      filteredBody = transformed.body;
+      piiContext = transformed.context;
+    }
     reservation = reserveQuota(req.user, req.body.max_tokens, req.gatewayModel.max_tokens);
     const payload = { ...filteredBody, max_tokens: reservation.maxTokens };
     contentFilters.assertRequestSize(payload);
@@ -138,7 +145,8 @@ router.post('/chat/completions', validateToken, validateModelAccess, async (req,
           response,
           res,
           controller.signal,
-          filterSnapshot.output_mask_patterns
+          filterSnapshot.output_mask_patterns,
+          piiContext
         );
       } catch (error) {
         if (error.code === 'filter_processing_failed') {
@@ -180,7 +188,8 @@ router.post('/chat/completions', validateToken, validateModelAccess, async (req,
     const { inputTokens, outputTokens } = usageFromProvider(body);
     let filteredResponse;
     try {
-      filteredResponse = contentFilters.applyOutputFilters(body, filterSnapshot);
+      const restoredResponse = piiContext ? piiFilter.applyOutputFilter(body, piiContext) : body;
+      filteredResponse = contentFilters.applyOutputFilters(restoredResponse, filterSnapshot);
     } catch {
       recordUsage(
         reservation.requestId,
@@ -241,6 +250,12 @@ router.post('/chat/completions', validateToken, validateModelAccess, async (req,
     clearTimeout(timeout);
     activeControllers.delete(controller);
     res.off('close', disconnect);
+    try {
+      piiFilter.clearContext(piiContext);
+    } catch {
+      // Cleanup failure must not skip quota/concurrency release.
+    }
+    piiContext = null;
     if (reservation && !requestFinalized) {
       try {
         usage.releaseReservation(reservation.requestId);
@@ -269,9 +284,15 @@ async function writeStreamChunk(response, res, chunk, signal) {
   if (!res.write(chunk)) await once(res, 'drain', { signal });
 }
 
-async function relayStream(response, res, signal, outputPatterns) {
-  if (outputPatterns.length > 0) {
-    return relayFilteredStream(response, res, signal, outputPatterns);
+async function relayStream(response, res, signal, outputPatterns, piiContext) {
+  if (outputPatterns.length > 0 || piiContext !== null) {
+    return relayFilteredStream(
+      response,
+      res,
+      signal,
+      outputPatterns,
+      piiContext
+    );
   }
   setStreamHeaders(response, res);
   res.flushHeaders();
@@ -304,10 +325,11 @@ async function relayStream(response, res, signal, outputPatterns) {
 }
 
 
-function createMaskState(patterns) {
+function createMaskState(patterns, piiContext) {
   return {
     filter: contentFilters.createLiteralFilter(patterns),
-    maxPatternLength: Math.max(...patterns.map((pattern) => pattern.length)),
+    maxPatternLength: Math.max(1, ...patterns.map((pattern) => pattern.length)),
+    piiContext,
     choices: new Map(),
     inputTokens: 0,
     outputTokens: 0,
@@ -319,7 +341,11 @@ function createMaskState(patterns) {
 function choiceState(streamState, index) {
   let state = streamState.choices.get(index);
   if (!state) {
-    state = { carry: '', finished: false };
+    state = {
+      restorer: streamState.piiContext ? piiFilter.createRestorationCarry(streamState.piiContext) : null,
+      carry: '',
+      finished: false
+    };
     streamState.choices.set(index, state);
   }
   return state;
@@ -355,6 +381,12 @@ function filterStreamError(streamState) {
   return error;
 }
 
+function restoreThenMask(state, content, streamState, terminal = false) {
+  let restored = state.restorer ? state.restorer.push(content) : content;
+  if (terminal && state.restorer) restored += state.restorer.flush();
+  return maskIncrementally(state, restored, streamState, terminal);
+}
+
 function isDataLine(line) {
   return line === 'data' || line.startsWith('data:');
 }
@@ -384,8 +416,8 @@ function serializeDataEvent(lines, body, delimiter) {
 function flushChoices(streamState, delimiter) {
   const choices = [];
   for (const [index, state] of streamState.choices) {
-    if (!state.carry) continue;
-    const content = maskIncrementally(state, '', streamState, true);
+    if (state.finished) continue;
+    const content = restoreThenMask(state, '', streamState, true);
     if (content) choices.push({ index, delta: { content }, finish_reason: null });
   }
   if (choices.length === 0) return [];
@@ -447,9 +479,9 @@ function transformDataEvent(rawEvent, delimiter, streamState) {
       const finishes = Object.hasOwn(choice, 'finish_reason') && choice.finish_reason !== null;
       if (finishes && typeof choice.finish_reason !== 'string') throw filterStreamError(streamState);
       const content = typeof choice.delta.content === 'string' ? choice.delta.content : '';
-      let output = maskIncrementally(state, content, streamState);
+      let output = restoreThenMask(state, content, streamState);
       if (finishes) {
-        output += maskIncrementally(state, '', streamState, true);
+        output += restoreThenMask(state, '', streamState, true);
         state.finished = true;
       }
       if (typeof choice.delta.content === 'string' || output) choice.delta.content = output;
@@ -529,8 +561,7 @@ async function writeCompleteEvents(response, res, signal, pending, bytes, stream
         pending.buffer.toString('ascii', rawLength, pending.length),
         streamState
       );
-    } catch (error) {
-      if (error.code === 'filter_processing_failed') throw error;
+    } catch {
       throw filterStreamError(streamState);
     }
     resetEventAccumulator(pending);
@@ -540,15 +571,20 @@ async function writeCompleteEvents(response, res, signal, pending, bytes, stream
   }
 }
 
-async function relayFilteredStream(response, res, signal, patterns) {
-  const streamState = createMaskState(patterns);
+async function relayFilteredStream(response, res, signal, patterns, piiContext) {
+  const streamState = createMaskState(patterns, piiContext);
   const pending = createEventAccumulator();
   for await (const chunk of response.body) {
     await writeCompleteEvents(response, res, signal, pending, chunk, streamState);
   }
 
   if (pending.length > 0) throw filterStreamError(streamState);
-  const finalOutput = streamState.done ? [] : flushChoices(streamState, '\n\n');
+  let finalOutput;
+  try {
+    finalOutput = streamState.done ? [] : flushChoices(streamState, '\n\n');
+  } catch {
+    throw filterStreamError(streamState);
+  }
   for (const event of finalOutput) {
     await writeStreamChunk(response, res, event, signal);
   }

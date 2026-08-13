@@ -24,6 +24,8 @@ let db;
 let applicationLogger;
 let contentFilters;
 let originalApplyOutputFilters;
+let piiFilter;
+let originalPiiMethods;
 let usageService;
 let originalRecordFailure;
 let originalReleaseReservation;
@@ -125,6 +127,17 @@ function requestLogs() {
   `).all();
 }
 
+
+function setBuiltInPiiActive(active = true) {
+  db.prepare(
+    'INSERT INTO app_settings ' +
+    '(setting_key, setting_value, updated_at) ' +
+    "VALUES ('built_in_pii_filter_active', ?, ?) " +
+    'ON CONFLICT(setting_key) DO UPDATE SET ' +
+    'setting_value = excluded.setting_value, ' +
+    'updated_at = excluded.updated_at'
+  ).run(active ? '1' : '0', new Date().toISOString());
+}
 before(async () => {
   providerServer = http.createServer(async (req, res) => {
     if (req.url !== '/chat/completions' || req.method !== 'POST') {
@@ -153,6 +166,13 @@ before(async () => {
       return res.end('data: {"choices":[{"delta":{"content":"raw-secret"}}]}\r\n\r\ndata: [DONE]\r\n\r\n');
     }
 
+    if (payload.echo_filtered_input === true) {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      return res.end(JSON.stringify({
+        choices: [{ message: { content: payload.messages[0].content } }],
+        usage: { prompt_tokens: 3, completion_tokens: 2, total_tokens: 5 }
+      }));
+    }
     const body = {
       id: 'runtime-response',
       model: payload.model,
@@ -183,6 +203,8 @@ before(async () => {
   originalApplyOutputFilters = contentFilters.applyOutputFilters;
   usageService = require('../services/usage');
   originalRecordFailure = usageService.recordFailure;
+  piiFilter = require('../services/pii-filter');
+  originalPiiMethods = { ...piiFilter };
   originalReleaseReservation = usageService.releaseReservation;
   gatewayServer = http.createServer(app);
   await listen(gatewayServer);
@@ -226,12 +248,14 @@ beforeEach(() => {
   contentFilters.applyOutputFilters = originalApplyOutputFilters;
   usageService.recordFailure = originalRecordFailure;
   usageService.releaseReservation = originalReleaseReservation;
+  Object.assign(piiFilter, originalPiiMethods);
   db.exec(`
     DELETE FROM content_filter_models;
     DELETE FROM content_filters;
     DELETE FROM quota_reservations;
     DELETE FROM usage_logs;
     DELETE FROM request_logs;
+    DELETE FROM app_settings WHERE setting_key = 'built_in_pii_filter_active';
   `);
   providerCalls = 0;
   receivedPayloads = [];
@@ -241,6 +265,7 @@ beforeEach(() => {
 
 after(async () => {
   if (contentFilters) contentFilters.applyOutputFilters = originalApplyOutputFilters;
+  if (piiFilter) Object.assign(piiFilter, originalPiiMethods);
   if (usageService) {
     usageService.recordFailure = originalRecordFailure;
     usageService.releaseReservation = originalReleaseReservation;
@@ -525,4 +550,53 @@ test('streaming without an output filter retains the existing byte-transparent r
     await response.text(),
     'data: {"choices":[{"delta":{"content":"raw-secret"}}]}\r\n\r\ndata: [DONE]\r\n\r\n'
   );
+});
+
+test('built-in PII default-off preserves input while active restores PII and redacts secrets', async () => {
+  const resident = '000229-3123456';
+  const email = 'synthetic.user@example.test';
+  const secret = 'AKIAABCDEFGHIJKLMNOP';
+  const body = {
+    model: 'runtime-primary',
+    echo_filtered_input: true,
+    messages: [{ role: 'user', content: `${resident} ${email} ${email} ${secret}` }]
+  };
+
+  let response = await chat(primaryUser.token, body);
+  assert.equal(response.status, 200);
+  assert.equal(receivedPayloads[0].messages[0].content, body.messages[0].content);
+
+  providerCalls = 0;
+  receivedPayloads = [];
+  setBuiltInPiiActive();
+  response = await chat(primaryUser.token, body);
+  assert.equal(response.status, 200);
+  const providerContent = receivedPayloads[0].messages[0].content;
+  assert.equal(providerContent.includes(resident), false);
+  assert.equal(providerContent.includes(email), false);
+  assert.equal(providerContent.includes(secret), false);
+  const tokens = providerContent.match(/\[\[LLMWARD:[^\]]+\]\]/gu);
+  assert.equal(tokens.length >= 3, true);
+  assert.equal(tokens[1], tokens[2]);
+  assert.equal(response.body.choices[0].message.content.includes(resident), true);
+  assert.equal(response.body.choices[0].message.content.includes(email), true);
+  assert.equal(response.body.choices[0].message.content.includes(secret), false);
+  assert.equal(response.body.choices[0].message.content.includes('[FILTERED]'), true);
+  assert.equal(response.body.choices[0].message.content.includes('[[LLMWARD:'), false);
+});
+
+test('built-in PII runs after literal input masks and clears its request-local context', async () => {
+  const resident = '000229-3123456';
+  addFilter({ patterns: [resident], inputAction: 'mask', global: true });
+  setBuiltInPiiActive();
+  let cleared = [];
+  piiFilter.clearContext = (context) => { cleared.push(context); };
+
+  const response = await chat(primaryUser.token, {
+    model: 'runtime-primary', echo_filtered_input: true,
+    messages: [{ role: 'user', content: resident }]
+  });
+  assert.equal(response.status, 200);
+  assert.equal(receivedPayloads[0].messages[0].content, '[FILTERED]');
+  assert.deepEqual(cleared, [null]);
 });

@@ -55,7 +55,7 @@ function admin(route, options = {}) {
   });
 }
 
-function streamRequest() {
+function streamRequest(overrides = {}) {
   return fetch(`${baseUrl}/v1/chat/completions`, {
     method: 'POST',
     headers: {
@@ -66,7 +66,7 @@ function streamRequest() {
       model: 'filter-streaming',
       stream: true,
       max_tokens: 20,
-      messages: [{ role: 'user', content: 'ordinary' }]
+      messages: [{ role: 'user', content: 'ordinary' }], ...overrides
     })
   });
 }
@@ -78,7 +78,19 @@ function addOutputFilter(patterns) {
       (name, patterns, input_action, output_action, is_active, is_global, created_at, updated_at)
     VALUES (?, ?, NULL, 'mask', 1, 1, ?, ?)
   `).run(crypto.randomUUID(), JSON.stringify(patterns), now, now);
+
   return Number(result.lastInsertRowid);
+}
+
+function setBuiltInPiiActive(active = true) {
+  db.prepare(
+    'INSERT INTO app_settings ' +
+    '(setting_key, setting_value, updated_at) ' +
+    "VALUES ('built_in_pii_filter_active', ?, ?) " +
+    'ON CONFLICT(setting_key) DO UPDATE SET ' +
+    'setting_value = excluded.setting_value, ' +
+    'updated_at = excluded.updated_at'
+  ).run(active ? '1' : '0', new Date().toISOString());
 }
 
 function addInputOnlyFilter(patterns) {
@@ -223,6 +235,7 @@ beforeEach(() => {
     DELETE FROM quota_reservations;
     DELETE FROM usage_logs;
     DELETE FROM request_logs;
+    DELETE FROM app_settings WHERE setting_key = 'built_in_pii_filter_active';
   `);
   providerEvents.removeAllListeners();
   providerHandler = async (req, res) => writeChunks(res, [
@@ -840,4 +853,29 @@ test('max-pattern streaming avoids full-text regular-expression scans', async ()
 
   assert.equal(streamedContent(dataEvents(text), 0), 'visible');
   assert.equal(fullTextMatchers, 0);
+});
+
+test('request-owned PII stream restoration survives byte and event token splits', async () => {
+  const resident = '000229-3123456';
+  let placeholder;
+  setBuiltInPiiActive();
+  providerHandler = async (req, res, payload) => {
+    placeholder = payload.messages[0].content;
+    const parts = [
+      placeholder.slice(0, 8),
+      placeholder.slice(8, 25),
+      placeholder.slice(25, -2),
+      placeholder.slice(-2)
+    ];
+    const source = parts.map((content, index) =>
+      `data: ${JSON.stringify({ choices: [{ index: 0, delta: { content }, finish_reason: index === 3 ? 'stop' : null }] })}\n\n`
+    );
+    await writeChunks(res, source.concat('data: [DONE]\n\n'));
+  };
+
+  const response = await streamRequest({ messages: [{ role: 'user', content: resident }] });
+  assert.equal(response.status, 200);
+  const text = await response.text();
+  assert.equal(streamedContent(dataEvents(text), 0), resident);
+  assert.equal(text.includes(placeholder), false);
 });
