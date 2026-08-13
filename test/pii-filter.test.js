@@ -6,6 +6,8 @@ const {
   getRuleMetadata,
   validateRuleDefinitions,
   applyInputFilter,
+  applyOutputFilter,
+  createRestorationCarry,
   clearContext
 } = require('../services/pii-filter');
 const { ApiError } = require('../services/errors');
@@ -113,13 +115,22 @@ test('rule definitions reject invalid declarations and normalize runtime faults'
 test('rule metadata exposes only the deeply frozen ordered public fields', () => {
   const metadata = getRuleMetadata();
 
-  assert.deepEqual(metadata.map(({ id, mode }) => [id, mode]), [
-    ['kr_resident_registration_number', 'restore'],
-    ['kr_foreigner_registration_number', 'restore'],
-    ['payment_card_number', 'restore'],
-    ['kr_phone_number', 'restore'],
-    ['email_address', 'restore'],
-    ['ipv4_address', 'restore']
+  assert.deepEqual(metadata.map(({ id, label, mode }) => ({ id, label, mode })), [
+    { id: 'private_key', label: 'Private Key Block', mode: 'redact' },
+    { id: 'openai_api_key', label: 'OpenAI API Key', mode: 'redact' },
+    { id: 'anthropic_api_key', label: 'Anthropic API Key', mode: 'redact' },
+    { id: 'aws_access_key_id', label: 'AWS Access Key ID', mode: 'redact' },
+    { id: 'github_token', label: 'GitHub Token', mode: 'redact' },
+    { id: 'slack_token', label: 'Slack Token', mode: 'redact' },
+    { id: 'slack_webhook', label: 'Slack Webhook', mode: 'redact' },
+    { id: 'stripe_secret_key', label: 'Stripe Secret or Restricted Key', mode: 'redact' },
+    { id: 'google_api_key', label: 'Google API Key', mode: 'redact' },
+    { id: 'kr_resident_registration_number', label: 'Korean Resident Registration Number', mode: 'restore' },
+    { id: 'kr_foreigner_registration_number', label: 'Korean Foreigner Registration Number', mode: 'restore' },
+    { id: 'payment_card_number', label: 'Payment Card Number', mode: 'restore' },
+    { id: 'kr_phone_number', label: 'Korean Phone Number', mode: 'restore' },
+    { id: 'email_address', label: 'Email Address', mode: 'restore' },
+    { id: 'ipv4_address', label: 'IPv4 Address', mode: 'restore' }
   ]);
   assert.equal(Object.isFrozen(metadata), true);
   assert.ok(metadata.every(Object.isFrozen));
@@ -574,6 +585,13 @@ function oneMiBNearMiss(fragment) {
   return candidates + ' '.repeat(size - candidates.length);
 }
 
+function oneMiBLineNearMiss(line) {
+  const size = 1024 * 1024;
+  const fragment = line + '\n';
+  const candidates = fragment.repeat(Math.floor(size / fragment.length));
+  return candidates + ' '.repeat(size - candidates.length);
+}
+
 const nonMatchMiBCases = new Map([
   ['all-x baseline', 'x'.repeat(1024 * 1024)],
   ['resident invalid dates', oneMiBNearMiss('000230-3123456')],
@@ -594,3 +612,407 @@ for (const [name, content] of nonMatchMiBCases) {
     assert.equal(result.context, null);
   });
 }
+
+
+const SECRET_FAMILIES = [
+  { name: 'OpenAI project', prefix: 'sk-proj-', minimum: 20, maximum: 256,
+    suffix: 'A', invalid: '.', adjacent: 'Z', ruleId: 'openai_api_key' },
+  { name: 'OpenAI generic', prefix: 'sk-', minimum: 20, maximum: 256,
+    suffix: 'B', invalid: '.', adjacent: 'Z', ruleId: 'openai_api_key' },
+  { name: 'Anthropic', prefix: 'sk-ant-', minimum: 20, maximum: 256,
+    suffix: 'C', invalid: '.', adjacent: 'Z', ruleId: 'anthropic_api_key' },
+  { name: 'AWS', prefix: 'AKIA', minimum: 16, maximum: 16,
+    suffix: 'D', invalid: '_', adjacent: 'Z', ruleId: 'aws_access_key_id' },
+  ...['ghp_', 'gho_', 'ghu_', 'ghs_', 'ghr_', 'github_pat_'].map((prefix) => ({
+    name: `GitHub ${prefix}`, prefix, minimum: 20, maximum: 255,
+    suffix: 'e', invalid: '-', adjacent: 'Z', ruleId: 'github_token'
+  })),
+  ...['xoxb-', 'xoxa-', 'xoxp-', 'xoxr-', 'xoxs-'].map((prefix) => ({
+    name: `Slack ${prefix}`, prefix, minimum: 20, maximum: 255,
+    suffix: '1', invalid: '_', adjacent: 'Z', ruleId: 'slack_token'
+  })),
+  ...['sk_live_', 'sk_test_', 'rk_live_', 'rk_test_'].map((prefix) => ({
+    name: `Stripe ${prefix}`, prefix, minimum: 16, maximum: 255,
+    suffix: 'L', invalid: '_', adjacent: 'Z', ruleId: 'stripe_secret_key'
+  })),
+  { name: 'Google', prefix: 'AIza', minimum: 35, maximum: 35,
+    suffix: 'A', invalid: '.', adjacent: 'Z', ruleId: 'google_api_key' }
+];
+
+const secrets = [
+  'sk-proj-' + 'A'.repeat(20),
+  'sk-' + 'B'.repeat(20),
+  'sk-ant-' + 'C'.repeat(20),
+  'AKIA' + 'D'.repeat(16),
+  'ghp_' + 'e'.repeat(20),
+  'gho_' + 'f'.repeat(20),
+  'ghu_' + 'g'.repeat(20),
+  'ghs_' + 'h'.repeat(20),
+  'ghr_' + 'i'.repeat(20),
+  'github_pat_' + 'j'.repeat(20),
+  'xoxb-' + '1'.repeat(20),
+  'xoxa-' + '2'.repeat(20),
+  'xoxp-' + '3'.repeat(20),
+  'xoxr-' + '4'.repeat(20),
+  'xoxs-' + '5'.repeat(20),
+  'https://hooks.slack.com/services/T00000000/B00000000/' +
+    'a'.repeat(24),
+  'sk_live_' + 'L'.repeat(16),
+  'sk_test_' + 'T'.repeat(16),
+  'rk_live_' + 'R'.repeat(16),
+  'rk_test_' + 'Q'.repeat(16),
+  'AIza' + 'A'.repeat(35)
+];
+
+function assertSecretAccepted(value, ruleId) {
+  const result = applyInputFilter({
+    messages: [{ content: `${ASTRAL} ${value} ${ASTRAL}` }]
+  });
+  assert.notEqual(result.context, null, value);
+  const { token, ruleId: actualRuleId } = onlyToken(result);
+  assert.equal(actualRuleId, ruleId, value);
+  assert.equal(result.body.messages[0].content.includes(value), false, value);
+  assert.equal(result.context.restoreByToken.size, 0, value);
+  assert.equal(result.context.tokenByPii.size, 0, value);
+  assert.deepEqual([...result.context.secretTokens], [token], value);
+}
+
+test('fixed-prefix secrets enforce exact grammars and token boundaries', () => {
+  for (const family of SECRET_FAMILIES) {
+    const fixture = family.prefix + family.suffix.repeat(family.minimum);
+    assertSecretAccepted(fixture, family.ruleId);
+    assertSecretAccepted(family.prefix + family.suffix.repeat(family.maximum), family.ruleId);
+    assertRejected(family.prefix + family.suffix.repeat(family.minimum - 1));
+    assertRejected(family.prefix + family.suffix.repeat(family.minimum - 1) +
+      family.invalid + family.suffix);
+    assertRejected(family.adjacent + fixture);
+    assertRejected(family.prefix + family.suffix.repeat(family.maximum + 1));
+  }
+  const expectedRules = [
+    'openai_api_key', 'openai_api_key', 'anthropic_api_key',
+    'aws_access_key_id', 'github_token', 'github_token', 'github_token',
+    'github_token', 'github_token', 'github_token', 'slack_token',
+    'slack_token', 'slack_token', 'slack_token', 'slack_token',
+    'slack_webhook', 'stripe_secret_key', 'stripe_secret_key',
+    'stripe_secret_key', 'stripe_secret_key', 'google_api_key'
+  ];
+  for (let index = 0; index < secrets.length; index += 1) {
+    assertSecretAccepted(secrets[index], expectedRules[index]);
+  }
+});
+
+test('Slack webhook secrets require the exact host, segment lengths, and boundaries', () => {
+  const minimum = 'https://hooks.slack.com/services/' +
+    'T'.repeat(8) + '/' + 'B'.repeat(8) + '/' + 'a'.repeat(20);
+  const accepted = 'https://hooks.slack.com/services/' +
+    'T'.repeat(8) + '/' + 'B'.repeat(64) + '/' + 'a'.repeat(255);
+  assertSecretAccepted(minimum, 'slack_webhook');
+  assertSecretAccepted(accepted, 'slack_webhook');
+  for (const value of [
+    'http://hooks.slack.com/services/' + 'T'.repeat(8) + '/' +
+      'B'.repeat(8) + '/' + 'a'.repeat(20),
+    'https://example.test/services/' + 'T'.repeat(8) + '/' +
+      'B'.repeat(8) + '/' + 'a'.repeat(20),
+    'https://hooks.slack.com/services/' + 'T'.repeat(7) + '/' +
+      'B'.repeat(8) + '/' + 'a'.repeat(20),
+    'https://hooks.slack.com/services/' + 'T'.repeat(8) + '/' +
+      'B'.repeat(7) + '/' + 'a'.repeat(20),
+    'https://hooks.slack.com/services/' + 'T'.repeat(8) + '/' +
+      'B'.repeat(8) + '/' + 'a'.repeat(19) + '.',
+    'https://hooks.slack.com/services/' + 'T'.repeat(8) + '/' +
+      'B'.repeat(8) + '/' + 'a'.repeat(19),
+    accepted + 'Z'
+  ]) assertRejected(value);
+});
+
+test('secret precedence claims a Luhn-valid Stripe token before card detection', () => {
+  assertSecretAccepted('sk_live_4242424242424242', 'stripe_secret_key');
+});
+
+test('generic secret-like text remains deliberately outside the registry', () => {
+  const genericSecretLikeText = [
+    'password=synthetic-value',
+    'Authorization: Bearer synthetic-oauth-token',
+    'client_id=synthetic.apps.example.test',
+    'https://synthetic-project.firebaseio.com'
+  ];
+  for (const content of genericSecretLikeText) {
+    const body = { messages: [{ content }] };
+    const result = applyInputFilter(body);
+    assert.equal(result.body, body);
+    assert.equal(result.context, null);
+  }
+});
+
+const PRIVATE_KEY_LABELS = [
+  'PRIVATE KEY', 'ENCRYPTED PRIVATE KEY', 'RSA PRIVATE KEY',
+  'EC PRIVATE KEY', 'OPENSSH PRIVATE KEY', 'DSA PRIVATE KEY',
+  'PGP PRIVATE KEY BLOCK'
+];
+
+function privateKeyFixture(label, lineEnding) {
+  const encoded = Buffer.from('synthetic fixture only').toString('base64');
+  const lines = label === 'PGP PRIVATE KEY BLOCK'
+    ? [`-----BEGIN ${label}-----`, '', encoded, '=AAAA', `-----END ${label}-----`]
+    : [`-----BEGIN ${label}-----`, encoded, `-----END ${label}-----`];
+  return lines.join(lineEnding);
+}
+
+test('private-key blocks redact complete whole-line PEM and PGP spans for LF and CRLF', () => {
+  for (const lineEnding of ['\n', '\r\n']) {
+    for (const label of PRIVATE_KEY_LABELS) {
+      const raw = privateKeyFixture(label, lineEnding);
+      const result = applyInputFilter({
+        messages: [{ content: `before${lineEnding}${raw}${lineEnding}after` }]
+      });
+      assert.notEqual(result.context, null, label);
+      const [token] = result.context.secretTokens;
+      assert.equal(result.body.messages[0].content,
+        `before${lineEnding}${token}${lineEnding}after`, label);
+      assert.match(token, /:private_key:\d{6}\]\]$/u, label);
+    }
+  }
+});
+
+test('private-key missing or mismatched end markers fail closed for LF and CRLF', () => {
+  const encoded = Buffer.from('synthetic fixture only').toString('base64');
+  for (const lineEnding of ['\n', '\r\n']) {
+    for (const content of [
+      ['-----BEGIN PRIVATE KEY-----', encoded].join(lineEnding),
+      ['-----BEGIN PRIVATE KEY-----', encoded,
+        '-----END RSA PRIVATE KEY-----'].join(lineEnding)
+    ]) {
+      assert.throws(() => applyInputFilter({ messages: [{ content }] }), (error) => {
+        assert.equal(error.status, 500);
+        assert.equal(error.code, 'filter_processing_failed');
+        assert.equal(error.message, 'Content filter processing failed');
+        assert.equal(error.message.includes(content), false);
+        return true;
+      });
+    }
+  }
+});
+
+test('private-key markers must occupy the whole ASCII line', () => {
+  const encoded = Buffer.from('synthetic fixture only').toString('base64');
+  for (const lineEnding of ['\n', '\r\n']) {
+    assertRejected(['prefix-----BEGIN PRIVATE KEY-----', encoded,
+      '-----END PRIVATE KEY-----'].join(lineEnding));
+    const suffixedEnd = ['-----BEGIN PRIVATE KEY-----', encoded,
+      '-----END PRIVATE KEY-----suffix'].join(lineEnding);
+    assert.throws(() => applyInputFilter({ messages: [{ content: suffixedEnd }] }),
+      (error) => error.status === 500 && error.code === 'filter_processing_failed');
+  }
+});
+
+test('secret-retention context stores distinct placeholders but no raw secret or digest', () => {
+  const rawSecret = 'sk-proj-' + 'S'.repeat(20);
+  const result = applyInputFilter({
+    messages: [{ content: `${rawSecret} separated ${rawSecret}` }]
+  });
+  assert.equal(result.context.restoreByToken.size, 0);
+  assert.equal(result.context.tokenByPii.size, 0);
+  assert.equal(result.context.secretTokens.size, 2);
+  const tokens = [...result.context.secretTokens];
+  assert.notEqual(tokens[0], tokens[1]);
+  for (const token of tokens) {
+    assert.match(token, /^\[\[LLMWARD:/u);
+    assert.equal(token.includes(rawSecret), false);
+  }
+  assert.equal(result.body.messages[0].content.includes(rawSecret), false);
+  const output = applyOutputFilter({
+    choices: [{ message: { content: result.body.messages[0].content } }]
+  }, result.context).choices[0].message.content;
+  assert.equal(output, '[FILTERED] separated [FILTERED]');
+  const serialized = JSON.stringify({
+    ...result.context,
+    restoreByToken: [...result.context.restoreByToken],
+    tokenByPii: [...result.context.tokenByPii],
+    secretTokens: [...result.context.secretTokens]
+  });
+  const digest = crypto.createHash('sha256').update(rawSecret).digest('hex');
+  assert.equal(serialized.includes(rawSecret), false);
+  assert.equal(serialized.includes(digest), false);
+});
+
+test('unmatched-key 1 MiB recognized begin fails closed within the bound', {
+  timeout: 5000
+}, () => {
+  const content = '-----BEGIN PRIVATE KEY-----\n' + 'A'.repeat(1024 * 1024);
+  assert.throws(() => applyInputFilter({ messages: [{ content }] }), (error) => {
+    assert.equal(error.status, 500);
+    assert.equal(error.code, 'filter_processing_failed');
+    assert.equal(error.message, 'Content filter processing failed');
+    assert.equal(error.message.includes(content), false);
+    return true;
+  });
+});
+
+const secretNearMissMiBCases = new Map(SECRET_FAMILIES.map((family) => [
+  family.name,
+  oneMiBNearMiss(family.prefix + family.suffix.repeat(family.minimum - 1))
+]));
+secretNearMissMiBCases.set('private-key marker lookalikes',
+  oneMiBLineNearMiss('-----BEGIN SYNTHETIC PRIVATE KEY-----'));
+secretNearMissMiBCases.set('PGP marker lookalikes',
+  oneMiBLineNearMiss('-----BEGIN PGP SYNTHETIC KEY BLOCK-----'));
+
+for (const [name, content] of secretNearMissMiBCases) {
+  test(`1 MiB secret near-miss ${name} preserves exact body identity`, {
+    timeout: 5000
+  }, () => {
+    assert.equal(content.length, 1024 * 1024);
+    const body = { messages: [{ content }] };
+    const result = applyInputFilter(body);
+    assert.equal(result.body, body);
+    assert.equal(result.context, null);
+  });
+}
+
+
+function outputFixture() {
+  const originalPii = 'synthetic.output@example.test';
+  const rawSecret = 'sk-proj-' + 'O'.repeat(20);
+  const input = applyInputFilter({
+    messages: [{ content: originalPii + ' / ' + rawSecret }]
+  });
+  const tokens = [...input.body.messages[0].content.matchAll(
+    /\[\[LLMWARD:[0-9a-f]{32}:([^:]+):\d{6}\]\]/gu
+  )].map((match) => match[0]);
+  return {
+    context: input.context,
+    originalPii,
+    rawSecret,
+    piiToken: tokens[0],
+    secretToken: tokens[1]
+  };
+}
+
+test('output restoration changes only exact owned message content tokens', () => {
+  const { context, originalPii, rawSecret, piiToken, secretToken } =
+    outputFixture();
+  const fabricated =
+    '[[LLMWARD:ffffffffffffffffffffffffffffffff:email_address:000001]]';
+  const providerGeneratedPii = '000229-3123456';
+  const providerResponse = {
+    choices: [{
+      index: 0,
+      message: {
+        content: piiToken + ' / ' + secretToken + ' / ' + fabricated +
+          ' / ' + providerGeneratedPii + ' / ' + rawSecret,
+        tool_calls: [{ function: { arguments: piiToken } }]
+      }
+    }],
+    vendor: piiToken
+  };
+
+  const restored = applyOutputFilter(providerResponse, context);
+
+  assert.equal(restored.choices[0].message.content,
+    originalPii + ' / [FILTERED] / ' + fabricated +
+      ' / ' + providerGeneratedPii + ' / ' + rawSecret);
+  assert.equal(restored.choices[0].message.tool_calls[0].function.arguments,
+    piiToken);
+  assert.equal(restored.vendor, piiToken);
+  assert.equal(providerResponse.choices[0].message.content.includes(piiToken),
+    true);
+});
+
+test('output restoration leaves modified and other-request tokens unchanged', () => {
+  const first = outputFixture();
+  const second = outputFixture();
+  const modified = first.piiToken.replace(/000001\]\]$/u, '000099]]');
+  const response = {
+    choices: [{ message: {
+      content: modified + ' / ' + second.piiToken
+    } }]
+  };
+  const restored = applyOutputFilter(response, first.context);
+  assert.equal(restored.choices[0].message.content,
+    modified + ' / ' + second.piiToken);
+});
+
+test('output restoration preserves optional response shapes and null context identity', () => {
+  const { context } = outputFixture();
+  const values = [
+    {},
+    { choices: null },
+    { choices: {} },
+    { choices: [] },
+    { choices: [{}] },
+    { choices: [{ message: null }] },
+    { choices: [{ message: {} }] },
+    { choices: [{ message: { content: null } }] },
+    { choices: [{ message: { content: 42 } }] }
+  ];
+  for (const response of values) {
+    assert.deepEqual(applyOutputFilter(response, context), response);
+  }
+  const response = { choices: [{ message: { content: 'ordinary' } }] };
+  assert.equal(applyOutputFilter(response, null), response);
+});
+
+test('output restoration normalizes clone failures to a safe 502', () => {
+  const { context } = outputFixture();
+  assert.throws(
+    () => applyOutputFilter({
+      choices: [{ message: { content: 'ordinary' } }],
+      unsupported: () => {}
+    }, context),
+    (error) => {
+      assert.equal(error.status, 502);
+      assert.equal(error.code, 'filter_processing_failed');
+      assert.equal(error.message, 'Content filter processing failed');
+      return true;
+    }
+  );
+});
+
+test('restoration carry restores PII and filters secrets at every split', () => {
+  const { context, originalPii, piiToken, secretToken } = outputFixture();
+  for (const [token, expected] of [
+    [piiToken, originalPii],
+    [secretToken, '[FILTERED]']
+  ]) {
+    for (let split = 0; split <= token.length; split += 1) {
+      const carry = createRestorationCarry(context);
+      const output = carry.push(token.slice(0, split)) +
+        carry.push(token.slice(split)) +
+        carry.flush();
+      assert.equal(output, expected, String(split));
+      assert.equal(carry.flush(), '');
+    }
+  }
+});
+
+test('restoration carry preserves multiple, fabricated, prefix-split, and incomplete values', () => {
+  const { context, originalPii, piiToken, secretToken } = outputFixture();
+  const fabricated = context.prefix + 'email_address:999999]]';
+  const incomplete = context.prefix + 'email_address:000001';
+  const carry = createRestorationCarry(context);
+  const text = 'a' + piiToken + 'b' + secretToken + 'c' + fabricated +
+    'd' + incomplete;
+  const chunks = [
+    text.slice(0, 3),
+    text.slice(3, context.prefix.length + 4),
+    text.slice(context.prefix.length + 4, -5),
+    text.slice(-5)
+  ];
+  const output = chunks.map((chunk) => carry.push(chunk)).join('') +
+    carry.flush();
+  assert.equal(output,
+    'a' + originalPii + 'b[FILTERED]c' + fabricated + 'd' + incomplete);
+});
+
+test('restoration carry keeps at most one bounded token prefix for 1 MiB input', {
+  timeout: 5000
+}, () => {
+  const { context } = outputFixture();
+  const input = 'x'.repeat(1024 * 1024 - context.prefix.length) +
+    context.prefix;
+  const carry = createRestorationCarry(context);
+  const first = carry.push(input);
+  const output = first + carry.flush();
+  assert.equal(output, input);
+  assert.ok(first.length >= input.length - 115);
+});

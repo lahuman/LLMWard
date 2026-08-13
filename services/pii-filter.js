@@ -26,6 +26,7 @@ const PHONE_PREFIXES = ['010', '070', ...LANDLINE_PREFIXES];
 const MAX_UNIQUE_VALUES = 200;
 const MAX_RESTORABLE_BYTES = 64 * 1024;
 const MAX_COUNTER = 999999;
+const MAX_PLACEHOLDER_LENGTH = 116;
 
 function isDigit(character) {
   return character >= '0' && character <= '9';
@@ -295,12 +296,263 @@ function validateIpv4(value, context) {
     !/[A-Za-z][A-Za-z0-9+.-]*:\/\/$/u.test(before);
 }
 
+const PRIVATE_KEY_LABELS = new Set([
+  'PRIVATE KEY', 'ENCRYPTED PRIVATE KEY', 'RSA PRIVATE KEY',
+  'EC PRIVATE KEY', 'OPENSSH PRIVATE KEY', 'DSA PRIVATE KEY',
+  'PGP PRIVATE KEY BLOCK'
+]);
+
+function privateKeyMarker(line, kind) {
+  const prefix = '-----' + kind + ' ';
+  if (!line.startsWith(prefix) || !line.endsWith('-----')) return null;
+  const label = line.slice(prefix.length, -5);
+  return PRIVATE_KEY_LABELS.has(label) ? label : null;
+}
+
+function lineAt(text, start) {
+  const newline = text.indexOf('\n', start);
+  const next = newline < 0 ? text.length : newline + 1;
+  let end = newline < 0 ? text.length : newline;
+  if (end > start && text[end - 1] === '\r') end -= 1;
+  return { line: text.slice(start, end), end, next };
+}
+
+function scanPrivateKeys(text) {
+  const spans = [];
+  let cursor = 0;
+  while (cursor < text.length) {
+    const beginLine = lineAt(text, cursor);
+    const label = privateKeyMarker(beginLine.line, 'BEGIN');
+    if (label === null) {
+      cursor = beginLine.next;
+      continue;
+    }
+    let inner = beginLine.next;
+    let matched = false;
+    while (inner < text.length) {
+      const endLine = lineAt(text, inner);
+      const endLabel = privateKeyMarker(endLine.line, 'END');
+      if (endLabel !== null) {
+        if (endLabel !== label) throw new Error('private key end marker mismatch');
+        spans.push({ start: cursor, end: endLine.end });
+        cursor = endLine.next;
+        matched = true;
+        break;
+      }
+      inner = endLine.next;
+    }
+    if (!matched) throw new Error('private key end marker missing');
+  }
+  return spans;
+}
+
+function isAlphaNumericUnderscoreHyphen(character) {
+  return isAsciiLetterOrDigit(character) ||
+    character === '_' || character === '-';
+}
+
+function isUpperAlphaNumeric(character) {
+  return character >= 'A' && character <= 'Z' || isDigit(character);
+}
+
+function isAlphaNumericUnderscore(character) {
+  return isAsciiLetterOrDigit(character) || character === '_';
+}
+
+function isAlphaNumericHyphen(character) {
+  return isAsciiLetterOrDigit(character) || character === '-';
+}
+
+function scanPrefixGrammar(text, prefixes, minimum, maximum, isSuffix, exclude) {
+  const candidates = [];
+  for (const prefix of prefixes) {
+    let cursor = 0;
+    while (cursor < text.length) {
+      const start = text.indexOf(prefix, cursor);
+      if (start < 0) break;
+      cursor = start + 1;
+      if (isSuffix(text[start - 1]) ||
+          exclude && exclude(text, start, prefix)) continue;
+      let end = start + prefix.length;
+      while (end < text.length && isSuffix(text[end])) end += 1;
+      const suffixLength = end - start - prefix.length;
+      if (suffixLength < minimum || suffixLength > maximum) continue;
+      candidates.push({ start, end });
+      cursor = end;
+    }
+  }
+  candidates.sort((left, right) =>
+    left.start - right.start || right.end - left.end
+  );
+  const spans = [];
+  for (const candidate of candidates) {
+    if (!spans.length || candidate.start >= spans.at(-1).end) {
+      spans.push(candidate);
+    }
+  }
+  return spans;
+}
+
+function scanOpenAiKeys(text) {
+  return scanPrefixGrammar(
+    text, ['sk-proj-', 'sk-'], 20, 256, isAlphaNumericUnderscoreHyphen,
+    (value, start, prefix) => prefix === 'sk-' &&
+      (value.startsWith('sk-proj-', start) ||
+       value.startsWith('sk-ant-', start))
+  );
+}
+
+function scanAnthropicKeys(text) {
+  return scanPrefixGrammar(
+    text, ['sk-ant-'], 20, 256, isAlphaNumericUnderscoreHyphen
+  );
+}
+
+function scanAwsAccessKeyIds(text) {
+  return scanPrefixGrammar(text, ['AKIA'], 16, 16, isUpperAlphaNumeric);
+}
+
+function scanGithubTokens(text) {
+  return scanPrefixGrammar(
+    text, ['github_pat_', 'ghp_', 'gho_', 'ghu_', 'ghs_', 'ghr_'],
+    20, 255, isAlphaNumericUnderscore
+  );
+}
+
+function scanSlackTokens(text) {
+  return scanPrefixGrammar(
+    text, ['xoxb-', 'xoxa-', 'xoxp-', 'xoxr-', 'xoxs-'],
+    20, 255, isAlphaNumericHyphen
+  );
+}
+
+function scanSlackWebhooks(text) {
+  const prefix = 'https://hooks.slack.com/services/';
+  const spans = [];
+  let cursor = 0;
+  while (cursor < text.length) {
+    const start = text.indexOf(prefix, cursor);
+    if (start < 0) break;
+    cursor = start + 1;
+    if (isAlphaNumericUnderscoreHyphen(text[start - 1])) continue;
+    let end = start + prefix.length;
+    const lengths = [];
+    for (let segment = 0; segment < 3; segment += 1) {
+      const segmentStart = end;
+      while (end < text.length &&
+          isAlphaNumericUnderscoreHyphen(text[end])) end += 1;
+      lengths.push(end - segmentStart);
+      if (segment < 2) {
+        if (text[end] !== '/') break;
+        end += 1;
+      }
+    }
+    if (lengths.length === 3 &&
+        lengths[0] >= 8 && lengths[0] <= 64 &&
+        lengths[1] >= 8 && lengths[1] <= 64 &&
+        lengths[2] >= 20 && lengths[2] <= 255 &&
+        !isAlphaNumericUnderscoreHyphen(text[end])) {
+      spans.push({ start, end });
+      cursor = end;
+    }
+  }
+  return spans;
+}
+
+function scanStripeKeys(text) {
+  return scanPrefixGrammar(
+    text, ['sk_live_', 'sk_test_', 'rk_live_', 'rk_test_'],
+    16, 255, isAsciiLetterOrDigit
+  );
+}
+
+function scanGoogleApiKeys(text) {
+  return scanPrefixGrammar(
+    text, ['AIza'], 35, 35, isAlphaNumericUnderscoreHyphen
+  );
+}
+
+// 개인키 블록: 지원하는 PEM/PGP BEGIN과 동일 라벨 END 사이 전체 블록을 제거한다.
+// BEGIN만 있거나 END 라벨이 다르면 본문 일부가 노출되지 않도록 요청을 실패시킨다.
+
+// OpenAI 비밀키: sk-proj- 또는 일반 sk- 뒤의 충분히 긴 토큰만 제거한다.
+// 짧은 예시와 Stripe/Anthropic 전용 접두사는 제외하고 토큰 경계를 검증한다.
+
+// Anthropic 비밀키: sk-ant- 뒤 20자 이상인 고유 토큰만 제거한다.
+// 짧은 예시와 토큰 일부 일치는 제외한다.
+
+// AWS 액세스 키 ID: AKIA 뒤 대문자 영숫자 16자리 전체만 제거한다.
+// 길거나 짧은 부분 문자열과 소문자 변형은 제외한다.
+
+// GitHub 토큰: 승인된 ghp/gho/ghu/ghs/ghr/github_pat 접두사 토큰을 제거한다.
+// 접두사 뒤 20자 이상과 토큰 경계를 검증한다.
+
+// Slack 토큰: 승인된 xoxb/xoxa/xoxp/xoxr/xoxs 접두사 토큰을 제거한다.
+// 짧은 예시와 지원하지 않는 xox 접두사는 제외한다.
+
+// Slack 웹훅: hooks.slack.com/services의 완전한 세 경로 세그먼트 URL을 제거한다.
+// 불완전한 URL과 다른 호스트의 유사 경로는 제외한다.
+
+// Stripe 비밀키: sk_live/sk_test/rk_live/rk_test 뒤 16자 이상 전체를 제거한다.
+// 공개키와 짧은 예시는 제외하고 전용 접두사와 토큰 경계를 검증한다.
+
+// Google API 키: AIza 뒤 허용 문자 정확히 35자리인 키 전체를 제거한다.
+// 한 글자 짧거나 긴 부분 일치와 토큰 내부 일치는 제외한다.
+
+// 모든 비밀 원문은 복원 맵에 저장하지 않고 요청 전용 토큰만 secretTokens에 기록한다.
+const RULES = [{
+  id: 'private_key',
+  label: 'Private Key Block',
+  mode: 'redact',
+  scan: scanPrivateKeys
+}, {
+  id: 'openai_api_key',
+  label: 'OpenAI API Key',
+  mode: 'redact',
+  scan: scanOpenAiKeys
+}, {
+  id: 'anthropic_api_key',
+  label: 'Anthropic API Key',
+  mode: 'redact',
+  scan: scanAnthropicKeys
+}, {
+  id: 'aws_access_key_id',
+  label: 'AWS Access Key ID',
+  mode: 'redact',
+  scan: scanAwsAccessKeyIds
+}, {
+  id: 'github_token',
+  label: 'GitHub Token',
+  mode: 'redact',
+  scan: scanGithubTokens
+}, {
+  id: 'slack_token',
+  label: 'Slack Token',
+  mode: 'redact',
+  scan: scanSlackTokens
+}, {
+  id: 'slack_webhook',
+  label: 'Slack Webhook',
+  mode: 'redact',
+  scan: scanSlackWebhooks
+}, {
+  id: 'stripe_secret_key',
+  label: 'Stripe Secret or Restricted Key',
+  mode: 'redact',
+  scan: scanStripeKeys
+}, {
+  id: 'google_api_key',
+  label: 'Google API Key',
+  mode: 'redact',
+  scan: scanGoogleApiKeys
+},
+
 // ?쒓뎅 二쇰??깅줉踰덊샇: YYMMDD ??二쇰? 援щ텇 ?レ옄(0~4, 9)? ?꾩쓽 6?먮━瑜?蹂댄샇?쒕떎.
 // ?섏씠?덉? ?앸뀈?붿씪 ????媛쒕쭔 ?덉슜?섍퀬 ?ㅼ젣 ?좎쭨? ?レ옄 寃쎄퀎瑜?寃利앺븳??
 // 2020-10-12 ?댄썑 ??6?먮━???꾩쓽媛믪씠誘濡?援ы삎 泥댄겕?ъ? ?붽뎄?섏? ?딅뒗??
-const RULES = [{
+{
   id: 'kr_resident_registration_number',
-  label: 'Korean resident registration number',
+  label: 'Korean Resident Registration Number',
   mode: 'restore',
   scan: scanKoreanIdentifiers,
   validate: validateResident
@@ -311,7 +563,7 @@ const RULES = [{
 // 二쇰??깅줉踰덊샇 泥댄겕?ш낵 ?명꽣?룹뿉??蹂듭궗??以묎컙 ?レ옄 吏앹닔 議곌굔? ?ъ슜?섏? ?딅뒗??
 {
   id: 'kr_foreigner_registration_number',
-  label: 'Korean foreigner registration number',
+  label: 'Korean Foreigner Registration Number',
   mode: 'restore',
   scan: scanKoreanIdentifiers,
   validate: validateForeigner
@@ -321,7 +573,7 @@ const RULES = [{
 // ?レ옄 寃쎄퀎? Luhn 泥댄겕?ъ쓣 寃利앺븯怨??쇳빀 援щ텇?먯? ?섎せ??泥댄겕?ъ? ?쒖쇅?쒕떎.
 {
   id: 'payment_card_number',
-  label: 'Payment card number',
+  label: 'Payment Card Number',
   mode: 'restore',
   scan: scanCards,
   validate: validateCard
@@ -331,7 +583,7 @@ const RULES = [{
 // 洹몃９ 湲몄씠? ?쇨???援щ텇?먮? 寃利앺븯怨?援ы삎 ?대룞?꾪솕, 050x, 080, ??쒕쾲?몃뒗 ?쒖쇅?쒕떎.
 {
   id: 'kr_phone_number',
-  label: 'Korean phone number',
+  label: 'Korean Phone Number',
   mode: 'restore',
   scan: scanPhones
 },
@@ -340,7 +592,7 @@ const RULES = [{
 // 濡쒖뺄?뚰듃/?꾨찓??湲몄씠? ?먃룻븯?댄뵂 寃쎄퀎瑜?寃利앺븯怨??꾩껜 RFC 援щЦ怨?URL? 吏?먰븯吏 ?딅뒗??
 {
   id: 'email_address',
-  label: 'Email address',
+  label: 'Email Address',
   mode: 'restore',
   scan: scanEmails,
   validate: validateEmail
@@ -350,7 +602,7 @@ const RULES = [{
 // 媛??ν뀩 0~255? ?レ옄쨌??寃쎄퀎瑜?寃利앺븯怨?URL ?대? 二쇱냼? ?몄뒪?몃챸? ?쒖쇅?쒕떎.
 {
   id: 'ipv4_address',
-  label: 'IPv4 address',
+  label: 'IPv4 Address',
   mode: 'restore',
   scan: scanIpv4,
   validate: validateIpv4
@@ -565,7 +817,14 @@ function transformationLimit() {
 }
 
 function tokenForClaim(context, rule, value) {
-  if (rule.mode !== 'restore') return '[REDACTED]';
+  if (context.nextCounter > MAX_COUNTER) throw transformationLimit();
+  if (rule.mode === 'redact') {
+    const token = context.prefix + rule.id + ':' +
+      String(context.nextCounter).padStart(6, '0') + ']]';
+    context.nextCounter += 1;
+    context.secretTokens.add(token);
+    return token;
+  }
   const bytes = Buffer.byteLength(value, 'utf8');
   if (context.restorableBytes + bytes > MAX_RESTORABLE_BYTES) {
     throw transformationLimit();
@@ -635,9 +894,120 @@ function applyInputFilter(body) {
   }
 }
 
+function validPlaceholder(candidate, context) {
+  if (!candidate.startsWith(context.prefix) ||
+      candidate.length > MAX_PLACEHOLDER_LENGTH ||
+      !candidate.endsWith(']]')) return false;
+  const body = candidate.slice(context.prefix.length, -2);
+  const separator = body.lastIndexOf(':');
+  if (separator < 1) return false;
+  const ruleId = body.slice(0, separator);
+  const counter = body.slice(separator + 1);
+  return RULE_ID.test(ruleId) && counter.length === 6 && isDigits(counter);
+}
+
+function replacementFor(candidate, context) {
+  if (context.restoreByToken.has(candidate)) {
+    return context.restoreByToken.get(candidate);
+  }
+  if (context.secretTokens.has(candidate)) return '[FILTERED]';
+  return candidate;
+}
+
+function longestPrefixSuffix(value, prefix) {
+  const maximum = Math.min(value.length, prefix.length - 1);
+  for (let length = maximum; length > 0; length -= 1) {
+    if (value.endsWith(prefix.slice(0, length))) return length;
+  }
+  return 0;
+}
+
+function processRestorationText(value, context) {
+  const output = [];
+  let cursor = 0;
+  while (cursor < value.length) {
+    const start = value.indexOf(context.prefix, cursor);
+    if (start < 0) {
+      const retained = longestPrefixSuffix(value.slice(cursor), context.prefix);
+      const end = value.length - retained;
+      output.push(value.slice(cursor, end));
+      return { output: output.join(''), carry: value.slice(end) };
+    }
+    output.push(value.slice(cursor, start));
+    const bounded = value.slice(
+      start,
+      Math.min(value.length, start + MAX_PLACEHOLDER_LENGTH)
+    );
+    const relativeClose = bounded.indexOf(']]', context.prefix.length);
+    if (relativeClose >= 0) {
+      const end = start + relativeClose + 2;
+      const candidate = value.slice(start, end);
+      if (validPlaceholder(candidate, context)) {
+        output.push(replacementFor(candidate, context));
+        cursor = end;
+      } else {
+        output.push(value[start]);
+        cursor = start + 1;
+      }
+      continue;
+    }
+    if (bounded.length < MAX_PLACEHOLDER_LENGTH) {
+      return { output: output.join(''), carry: value.slice(start) };
+    }
+    output.push(value[start]);
+    cursor = start + 1;
+  }
+  return { output: output.join(''), carry: '' };
+}
+
+function createRestorationCarry(context) {
+  let carry = '';
+  return {
+    push(text) {
+      const result = processRestorationText(carry + text, context);
+      carry = result.carry;
+      return result.output;
+    },
+    flush() {
+      const output = carry;
+      carry = '';
+      return output;
+    }
+  };
+}
+
+function restoreText(text, context) {
+  const carry = createRestorationCarry(context);
+  return carry.push(text) + carry.flush();
+}
+
+function applyOutputFilter(response, context) {
+  if (context === null) return response;
+  try {
+    const clone = structuredClone(response);
+    if (Array.isArray(clone.choices)) {
+      for (const choice of clone.choices) {
+        const message = choice && choice.message;
+        if (message && typeof message.content === 'string') {
+          message.content = restoreText(message.content, context);
+        }
+      }
+    }
+    return clone;
+  } catch {
+    throw new ApiError(
+      502,
+      'Content filter processing failed',
+      'filter_processing_failed'
+    );
+  }
+}
+
 module.exports = {
   getRuleMetadata,
   validateRuleDefinitions,
   applyInputFilter,
+  applyOutputFilter,
+  createRestorationCarry,
   clearContext
 };
