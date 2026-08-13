@@ -61,3 +61,19 @@ curl -N http://localhost:3000/v1/chat/completions \
 오류 본문은 규칙 이름·ID, 패턴 또는 일치 내용을 포함하지 않습니다.
 
 `content_filtered` is the sole exception for a client-safe policy name: its standard HTTP 400 body includes `filter_name`. When multiple active policies match, it identifies the first matching policy in database ID order. The response does not disclose a pattern or matched content.
+
+## Built-in Korean PII / secret filter
+
+`GET /admin/filters/built-in-pii` returns `{id,name,is_active,is_global,rules}`.
+`PUT /admin/filters/built-in-pii` accepts exactly `{"is_active":true|false}`;
+unknown fields and non-booleans are rejected. The setting key is
+`built_in_pii_filter_active`: missing or `0` is inactive, `1` is active, and a
+corrupt stored value makes admin GET return HTTP 500 `filter_configuration_invalid`
+without revealing that value. PUT repairs it with exact `0` or `1`.
+
+Supported input is `messages[*].content` strings and `{type:"text", text}` parts.
+At most 200 unique values and 64 KiB are restorable; secrets become `[FILTERED]`.
+Input processing uses HTTP 500 `filter_processing_failed`, oversize uses HTTP 413
+`request_too_large`, and non-stream output transformation uses HTTP 502
+`filter_processing_failed`. JSON/SSE transform before literal output masking;
+streaming fails safely before headers or aborts after headers.

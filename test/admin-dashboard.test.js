@@ -16,6 +16,7 @@ class FakeNode extends EventTarget {
     this.textContent = '';
     this.value = '';
     this.type = '';
+    this.checked = false;
     this.classList = {
       add() {},
       remove() {},
@@ -92,6 +93,9 @@ function createDashboardHarness({ storedKey = '', fetchOverride } = {}) {
   filterForm.elements.isGlobal = new FakeNode();
   const statsForm = new FakeForm({ range: '24h', start: '', end: '' });
   const requests = [];
+  const builtInPiiForm = new FakeForm();
+  builtInPiiForm.elements.isActive = new FakeNode();
+
   const document = {
     getElementById(id) {
       if (!elements.has(id)) elements.set(id, new FakeNode());
@@ -110,6 +114,9 @@ function createDashboardHarness({ storedKey = '', fetchOverride } = {}) {
     },
   };
   elements.set('provider-form', providerForm);
+  elements.set('built-in-pii-form', builtInPiiForm);
+  elements.set('built-in-pii-rules', new FakeNode());
+  elements.set('built-in-pii-state', new FakeNode());
   elements.set('model-form', modelForm);
   elements.set('filter-form', filterForm);
   elements.set('stats-form', statsForm);
@@ -138,6 +145,7 @@ function createDashboardHarness({ storedKey = '', fetchOverride } = {}) {
       if (overridden !== undefined) return overridden;
       if (route === '/admin/providers' && options.method === 'POST') return response({});
       if (route === '/admin/users') return response([]);
+      if (route === '/admin/filters/built-in-pii') return response({ id: 'built-in-pii', name: 'Built-in Korean PII & Secret Filter', is_active: false, is_global: true, rules: [] });
       if (route === '/admin/models') return response([]);
       if (route === '/admin/providers') return response([]);
       if (route === '/admin/filters') return response([]);
@@ -159,6 +167,10 @@ function createDashboardHarness({ storedKey = '', fetchOverride } = {}) {
     providerForm,
     requests,
     status: document.getElementById('status'),
+    builtInPiiForm,
+    builtInPiiRules: document.getElementById('built-in-pii-rules'),
+    builtInPiiState: document.getElementById('built-in-pii-state'),
+
     usersContent: document.getElementById('users-content'),
     window: context.window,
   };
@@ -193,7 +205,7 @@ test('provider submit keeps its form after the async create request', async () =
   assert.equal(status.className, 'status success');
   assert.deepEqual(
     requests.filter(({ options }) => !options.method).map(({ route }) => route).sort(),
-    ['/admin/filters', '/admin/models', '/admin/onboarding', '/admin/provider-presets', '/admin/providers', '/admin/users'].sort(),
+    ['/admin/filters', '/admin/filters/built-in-pii', '/admin/models', '/admin/onboarding', '/admin/provider-presets', '/admin/providers', '/admin/users'].sort(),
   );
 });
 
@@ -206,7 +218,7 @@ test('provider submit reloads configuration without reloading statistics', async
   const reloadRoutes = requests.filter(({ options }) => !options.method).map(({ route }) => route);
   assert.deepEqual(
     reloadRoutes.filter((route) => !route.startsWith('/admin/stats?')).sort(),
-    ['/admin/filters', '/admin/models', '/admin/onboarding', '/admin/provider-presets', '/admin/providers', '/admin/users'].sort(),
+    ['/admin/filters', '/admin/filters/built-in-pii', '/admin/models', '/admin/onboarding', '/admin/provider-presets', '/admin/providers', '/admin/users'].sort(),
   );
   assert.equal(reloadRoutes.some((route) => route.startsWith('/admin/stats?')), false);
 });

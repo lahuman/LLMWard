@@ -33,6 +33,18 @@
       </section>
       <section id="tab-filters" class="hidden" role="tabpanel" aria-labelledby="tab-button-filters">
         <section id="filter-usage-guide" class="card filter-guide" aria-labelledby="filter-guide-title">
+        <section id="built-in-pii-filter" class="card" aria-labelledby="built-in-pii-title">
+          <h2 id="built-in-pii-title">Built-in Korean PII &amp; Secret Filter</h2>
+          <p class="help">Global for every model and inactive by default. Reviewed code defines the rules; the browser can only enable or disable them.</p>
+          <p class="help">PII mappings exist for one request only. Secrets are never restored and return as <code>[FILTERED]</code>. This reduces supported provider-input disclosure; it is not general DLP.</p>
+          <form id="built-in-pii-form">
+            <div class="checks"><label><input name="isActive" type="checkbox" aria-describedby="built-in-pii-help">Enable globally</label><span id="built-in-pii-state" class="badge">Inactive</span></div>
+            <p id="built-in-pii-help" class="help">Use literal filters below for organization-specific values.</p>
+            <button type="submit">Save built-in filter</button>
+          </form>
+          <h3 id="built-in-pii-rules-title">Compiled rules</h3>
+          <ul id="built-in-pii-rules" aria-labelledby="built-in-pii-rules-title"></ul>
+        </section>
           <h2 id="filter-guide-title">How filters work</h2>
           <ol class="filter-steps">
             <li>Enter one case-insensitive literal pattern per line.</li>

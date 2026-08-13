@@ -9,7 +9,7 @@ const { hashToken } = require('../db/migrations');
 const { audit } = require('../services/audit');
 const { createBackup } = require('../services/backup');
 const { retentionDays, cleanupRequestLogs, setRetentionDays } = require('../services/retention');
-const { listFilters, createFilter, updateFilter, deleteFilter } = require('../services/content-filters');
+const { listFilters, createFilter, updateFilter, deleteFilter, getBuiltInPiiFilter, setBuiltInPiiFilter } = require('../services/content-filters');
 
 const router = express.Router();
 const IDENTIFIER = /^[a-z0-9][a-z0-9_.-]{0,127}$/;
@@ -60,6 +60,14 @@ function auditTargetId(value) {
 
 function failureAuditMetadata(requestPath) {
   const segments = requestPath.split('/').filter(Boolean);
+  if ((segments[0] || '').toLowerCase() === 'filters' &&
+      (segments[1] || '').toLowerCase() === 'built-in-pii') {
+    return {
+      action: 'filter.change',
+      targetType: 'filter',
+      targetId: 'built-in-pii'
+    };
+  }
   const family = FAILURE_AUDIT_FAMILIES.get((segments[0] || '').toLowerCase()) || ADMIN_FAILURE_AUDIT;
   return {
     action: family.action,
@@ -586,6 +594,16 @@ router.delete('/models/:id', (req, res, next) => {
     audit('model.delete', 'model', modelId, true, []);
     res.json({ message: 'Model deleted' });
   } catch (error) { next(error); }
+});
+
+router.get('/filters/built-in-pii', (req, res, next) => {
+  try { res.json(getBuiltInPiiFilter()); }
+  catch (error) { next(error); }
+});
+
+router.put('/filters/built-in-pii', (req, res, next) => {
+  try { res.json(setBuiltInPiiFilter(req.body)); }
+  catch (error) { next(error); }
 });
 
 router.get('/filters', (req, res, next) => {

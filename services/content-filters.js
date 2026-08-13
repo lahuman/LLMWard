@@ -2,10 +2,14 @@ const db = require('../db/database');
 const { ApiError } = require('./errors');
 const { audit } = require('./audit');
 const { forEachChatText } = require('./chat-content');
+const piiFilter = require('./pii-filter');
 
 const FILTERED = '[FILTERED]';
 const MAX_NAME_LENGTH = 100;
 const MAX_PATTERN_LENGTH = 256;
+const BUILT_IN_PII_SETTING = 'built_in_pii_filter_active';
+const BUILT_IN_PII_ID = 'built-in-pii';
+const BUILT_IN_PII_NAME = 'Built-in Korean PII & Secret Filter';
 const MAX_STORED_PATTERNS = 200;
 const MAX_REQUEST_BYTES = 1024 * 1024;
 const LITERAL_AUTOMATON_CACHE_MAX_ENTRIES = 16;
@@ -176,6 +180,18 @@ function fixedConfiguration(work) {
   }
 }
 
+function builtInPiiFilterActive() {
+  const row = db.prepare(
+    'SELECT setting_value FROM app_settings WHERE setting_key = ?'
+  ).get(BUILT_IN_PII_SETTING);
+  if (!row || row.setting_value === '0') return false;
+  if (row.setting_value === '1') return true;
+  throw configurationError();
+}
+
+function builtInPiiResponse(isActive) {
+  return { id: BUILT_IN_PII_ID, name: BUILT_IN_PII_NAME, is_active: isActive, is_global: true, rules: piiFilter.getRuleMetadata() };
+}
 function storedPatterns(serialized) {
   return fixedConfiguration(() => {
     const parsed = JSON.parse(serialized);
@@ -231,6 +247,30 @@ function listFilters() {
     SELECT id, name, patterns, input_action, output_action, is_active, is_global, created_at, updated_at
     FROM content_filters ORDER BY id
   `).all().map(storedFilter);
+}
+
+function getBuiltInPiiFilter() {
+  return builtInPiiResponse(fixedConfiguration(builtInPiiFilterActive));
+}
+
+function setBuiltInPiiFilter(input) {
+  if (!input || typeof input !== 'object' || Array.isArray(input) ||
+      Object.keys(input).length !== 1 ||
+      !Object.hasOwn(input, 'is_active') ||
+      typeof input.is_active !== 'boolean') {
+    throw new ApiError(400, 'is_active must be the only field and must be boolean');
+  }
+  db.transaction(() => {
+    db.prepare(
+      'INSERT INTO app_settings ' +
+      '(setting_key, setting_value, updated_at) VALUES (?, ?, ?) ' +
+      'ON CONFLICT(setting_key) DO UPDATE SET ' +
+      'setting_value = excluded.setting_value, ' +
+      'updated_at = excluded.updated_at'
+    ).run(BUILT_IN_PII_SETTING, input.is_active ? '1' : '0', new Date().toISOString());
+    audit('filter.update', 'filter', BUILT_IN_PII_ID, true, ['is_active']);
+  }).immediate();
+  return builtInPiiResponse(input.is_active);
 }
 
 function validateModels(modelIds) {
@@ -377,6 +417,7 @@ function getEffectiveFilterSnapshot(modelId) {
       if (filter.output_action === 'mask') outputMaskPatterns.push(...filter.patterns);
     }
     return Object.freeze({
+      built_in_pii_filter_active: builtInPiiFilterActive(),
       input_block_patterns: Object.freeze(inputBlockPatterns),
       input_mask_patterns: Object.freeze(inputMaskPatterns),
       output_mask_patterns: Object.freeze(outputMaskPatterns),
@@ -1096,6 +1137,8 @@ function assertRequestSize(body) {
 
 module.exports = {
   listFilters,
+  getBuiltInPiiFilter,
+  setBuiltInPiiFilter,
   createFilter,
   updateFilter,
   deleteFilter,
