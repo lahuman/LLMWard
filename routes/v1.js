@@ -11,7 +11,7 @@ const { acquire } = require('../services/limits');
 const contentFilters = require('../services/content-filters');
 
 const router = express.Router();
-const activeControllers = new Set();
+const activeRequests = new Set();
 const IDENTIFIER = /^[a-z0-9][a-z0-9_.:/-]{0,199}$/;
 
 function modelPermissions(serialized) {
@@ -99,12 +99,18 @@ router.post('/chat/completions', validateToken, validateModelAccess, async (req,
   let clientDisconnected = false;
   let requestFinalized = false;
   const startedAt = Date.now();
+  let abortCause = null;
   const controller = new AbortController();
-  activeControllers.add(controller);
+  const abortRequest = (cause) => {
+    if (controller.signal.aborted) return;
+    abortCause = cause;
+    controller.abort();
+  };
+  activeRequests.add(abortRequest);
   const disconnect = () => {
     if (!res.writableEnded) {
       clientDisconnected = true;
-      controller.abort();
+      abortRequest('client');
     }
   };
   res.once('close', disconnect);
@@ -120,7 +126,7 @@ router.post('/chat/completions', validateToken, validateModelAccess, async (req,
     const payload = { ...filteredBody, max_tokens: reservation.maxTokens };
     contentFilters.assertRequestSize(payload);
     const serializedPayload = JSON.stringify(payload);
-    timeout = setTimeout(() => controller.abort(), config.providerTimeoutMs);
+    timeout = setTimeout(() => abortRequest('timeout'), config.providerTimeoutMs);
     const response = await fetch(buildProviderEndpoint(req.gatewayModel.base_url, 'chat/completions'), {
       method: 'POST',
       headers: getAuthHeaders(req.gatewayModel),
@@ -146,7 +152,7 @@ router.post('/chat/completions', validateToken, validateModelAccess, async (req,
         );
       } catch (error) {
         if (error.code === 'filter_processing_failed') {
-          controller.abort();
+          abortRequest('filter');
           if (error.providerUsage) {
             recordUsage(
               reservation.requestId,
@@ -211,11 +217,13 @@ router.post('/chat/completions', validateToken, validateModelAccess, async (req,
     requestFinalized = true;
     res.json(filteredResponse);
   } catch (error) {
-    const aborted = error.name === 'AbortError';
+    const aborted = error.name === 'AbortError' && controller.signal.aborted;
     const handledError = aborted
-      ? clientDisconnected
+      ? abortCause === 'client'
         ? new ApiError(499, 'Client disconnected', 'client_disconnected')
-        : new ApiError(504, 'Provider request timed out', 'provider_timeout')
+        : abortCause === 'timeout'
+          ? new ApiError(504, 'Provider request timed out', 'provider_timeout')
+          : new ApiError(503, 'Gateway is shutting down', 'gateway_shutdown')
       : error;
     if (!requestFinalized) {
       const requestId = reservation && reservation.requestId;
@@ -243,7 +251,7 @@ router.post('/chat/completions', validateToken, validateModelAccess, async (req,
     else if (!res.writableEnded) res.destroy();
   } finally {
     clearTimeout(timeout);
-    activeControllers.delete(controller);
+    activeRequests.delete(abortRequest);
     res.off('close', disconnect);
     if (reservation && !requestFinalized) {
       try {
@@ -602,7 +610,7 @@ router.get('/usage', validateToken, (req, res, next) => {
 });
 
 function abortInFlight() {
-  for (const controller of activeControllers) controller.abort();
+  for (const abortRequest of activeRequests) abortRequest('shutdown');
 }
 
 module.exports = router;

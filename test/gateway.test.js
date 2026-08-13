@@ -1075,12 +1075,20 @@ test('abortInFlight aborts active requests and cleanup is idempotent', async (t)
   const before = upstreamDisconnects;
   const started = once(providerEvents, 'abort-in-flight:started', { signal: AbortSignal.timeout(3000) });
   const closed = once(providerEvents, 'abort-in-flight:closed', { signal: AbortSignal.timeout(3000) });
-  let client;
-  client = http.request(`${baseUrl}/v1/chat/completions`, {
+  let resolveResponse;
+  let rejectResponse;
+  const responseResult = new Promise((resolve, reject) => {
+    resolveResponse = resolve;
+    rejectResponse = reject;
+  });
+  const client = http.request(`${baseUrl}/v1/chat/completions`, {
     method: 'POST', headers: { Authorization: `Bearer ${user.token}`, 'Content-Type': 'application/json' }
   }, (response) => {
     response.resume();
+    response.once('end', () => resolveResponse(response.statusCode));
+    response.once('error', rejectResponse);
   });
+  client.once('error', rejectResponse);
   const completed = once(client, 'close', { signal: AbortSignal.timeout(3000) });
   client.end(JSON.stringify({
     model: 'abort-in-flight', messages: [{ role: 'user', content: 'abort-secret' }], max_tokens: 1
@@ -1093,6 +1101,7 @@ test('abortInFlight aborts active requests and cleanup is idempotent', async (t)
   v1.abortInFlight();
   v1.abortInFlight();
   await closed;
+  assert.equal(await responseResult, 503);
   await completed;
   const reservationCount = () => db.prepare(
     'SELECT COUNT(*) AS count FROM quota_reservations WHERE user_id = ?'
@@ -1104,6 +1113,11 @@ test('abortInFlight aborts active requests and cleanup is idempotent', async (t)
   assert.equal(state().users[user.id], undefined);
   assert.equal(state().models['abort-in-flight'], undefined);
   assert.equal(state().providers[providerId], undefined);
+  assert.deepEqual(db.prepare(
+    'SELECT status, error_type FROM request_logs WHERE user_id = ? ORDER BY id'
+  ).all(user.id), [
+    { status: 'failure', error_type: 'internal' }
+  ]);
 });
 
 async function assertReservationLifetime(stream, expectedMs, username) {

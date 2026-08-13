@@ -193,6 +193,11 @@ test('SIGTERM aborts held requests and exits cleanly before the force limit', as
   assert.equal(receivedPromptMarker, promptMarker);
   const migrated = new Database(databasePath, { readonly: true });
   assert.equal(migrated.prepare('SELECT COUNT(*) AS count FROM quota_reservations').get().count, 0);
+  assert.deepEqual(migrated.prepare(
+    'SELECT status, error_type FROM request_logs ORDER BY id DESC LIMIT 1'
+  ).get(), {
+    status: 'failure', error_type: 'internal'
+  });
   migrated.close();
   const output = stdout + stderr;
   assert.equal(output.includes('LLM Gateway server started'), true);
