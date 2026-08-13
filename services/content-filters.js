@@ -1,6 +1,7 @@
 const db = require('../db/database');
 const { ApiError } = require('./errors');
 const { audit } = require('./audit');
+const { forEachChatText } = require('./chat-content');
 
 const FILTERED = '[FILTERED]';
 const MAX_NAME_LENGTH = 100;
@@ -1019,24 +1020,6 @@ function maskText(value, patterns) {
   return createMasker(patterns)(value);
 }
 
-function forEachRequestContent(body, visit) {
-  if (!body || typeof body !== 'object' || !Array.isArray(body.messages)) return false;
-  for (const message of body.messages) {
-    if (!message || typeof message !== 'object') continue;
-    if (typeof message.content === 'string') {
-      if (visit(message, 'content')) return true;
-      continue;
-    }
-    if (!Array.isArray(message.content)) continue;
-    for (const part of message.content) {
-      if (part && typeof part === 'object' && part.type === 'text' && typeof part.text === 'string') {
-        if (visit(part, 'text')) return true;
-      }
-    }
-  }
-  return false;
-}
-
 function applyInputFilters(body, snapshot) {
   const blocking = snapshotPatterns(snapshot, 'input_block_patterns');
   const masking = snapshotPatterns(snapshot, 'input_mask_patterns');
@@ -1046,9 +1029,9 @@ function applyInputFilters(body, snapshot) {
     let blockedPatternIndex = -1;
     let blocked;
     if (policyNamesByPattern === null) {
-      blocked = forEachRequestContent(body, (target, field) => block.test(target[field]));
+      blocked = forEachChatText(body, (target, field) => block.test(target[field]));
     } else {
-      forEachRequestContent(body, (target, field) => {
+      forEachChatText(body, (target, field) => {
         const current = block.firstPatternIndex(target[field]);
         if (current < 0 || (blockedPatternIndex >= 0 && current >= blockedPatternIndex)) return false;
         blockedPatternIndex = current;
@@ -1071,7 +1054,7 @@ function applyInputFilters(body, snapshot) {
   } catch {
     throw new ApiError(400, 'Request body cannot be filtered');
   }
-  forEachRequestContent(clone, (target, field) => {
+  forEachChatText(clone, (target, field) => {
     target[field] = mask(target[field]);
   });
   return clone;
