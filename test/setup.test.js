@@ -21,7 +21,7 @@ function countOccurrences(value, needle) {
 function runSetup(root, cwd, environmentOverrides = {}) {
   return new Promise((resolve) => {
     const environment = {
-      LLM_GATEWAY_SETUP_ROOT: root,
+      LLMWARD_SETUP_ROOT: root,
       PATH: process.env.PATH,
       SystemRoot: process.env.SystemRoot,
       SYSTEMROOT: process.env.SYSTEMROOT,
@@ -112,7 +112,7 @@ test('setup preserves a pre-existing temporary collision', async (t) => {
     "const fs = require('fs');",
     "const path = require('path');",
     "const randomBytes = crypto.randomBytes;",
-    `const temporaryPath = path.join(process.env.LLM_GATEWAY_SETUP_ROOT, '.env.' + process.pid + '.${suffix}.tmp');`,
+    `const temporaryPath = path.join(process.env.LLMWARD_SETUP_ROOT, '.env.' + process.pid + '.${suffix}.tmp');`,
     "fs.writeFileSync(temporaryPath, 'sentinel', { flag: 'wx', mode: 0o600 });",
     `crypto.randomBytes = (size) => size === 6 ? Buffer.from('${suffix}', 'hex') : randomBytes(size);`
   ].join('\n'));

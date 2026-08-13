@@ -642,17 +642,17 @@ test('provider credentials are never disclosed by admin responses', async () => 
 
 test('provider authentication modes and environment credential precedence are applied', () => {
   const { getAuthHeaders } = require('../services/provider-router');
-  process.env.LLM_GATEWAY_TEST_ONLY_KEY = 'environment-key';
+  process.env.LLMWARD_TEST_ONLY_KEY = 'environment-key';
   try {
     assert.equal(getAuthHeaders({ auth_type: 'none', stored_api_key: 'stored' }).Authorization, undefined);
     const apiKey = getAuthHeaders({
-      auth_type: 'api_key', api_key_env_name: 'LLM_GATEWAY_TEST_ONLY_KEY', stored_api_key: 'stored'
+      auth_type: 'api_key', api_key_env_name: 'LLMWARD_TEST_ONLY_KEY', stored_api_key: 'stored'
     });
     assert.equal(apiKey.Authorization, 'Bearer environment-key');
     const bearer = getAuthHeaders({ auth_type: 'bearer_token', stored_api_key: 'stored' });
     assert.equal(bearer.Authorization, 'Bearer stored');
   } finally {
-    delete process.env.LLM_GATEWAY_TEST_ONLY_KEY;
+    delete process.env.LLMWARD_TEST_ONLY_KEY;
   }
 });
 
@@ -846,7 +846,7 @@ test('database integrity remains valid', () => {
 test('setup creates secrets once and preserves existing configuration', () => {
   const setupRoot = fs.mkdtempSync(path.join(temporaryDirectory, 'setup-'));
   fs.copyFileSync(path.join(__dirname, '..', '.env.example'), path.join(setupRoot, '.env.example'));
-  const environment = { ...process.env, LLM_GATEWAY_SETUP_ROOT: setupRoot };
+  const environment = { ...process.env, LLMWARD_SETUP_ROOT: setupRoot };
   const first = spawnSync(process.execPath, [path.join(__dirname, '..', 'scripts', 'setup.js')], { encoding: 'utf8', env: environment });
   assert.equal(first.status, 0, first.stderr);
   const created = fs.readFileSync(path.join(setupRoot, '.env'), 'utf8');

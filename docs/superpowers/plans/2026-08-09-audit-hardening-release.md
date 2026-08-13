@@ -589,7 +589,7 @@ git commit -m "fix: harden admin browser responses"
 - Modify: `scripts/setup.js:20-38`
 
 **Interfaces:**
-- Consumes: optional `LLM_GATEWAY_SETUP_ROOT` test override.
+- Consumes: optional `LLMWARD_SETUP_ROOT` test override.
 - Produces: exactly one `.env` created with exclusive semantics; later invocations preserve it and never print its existing key.
 
 - [ ] **Step 1: Add concurrent setup regression**
@@ -600,7 +600,7 @@ Use asynchronous `spawn`, start eight setup processes against one temporary root
 function runSetup(root) {
   return new Promise((resolve) => {
     const child = spawn(process.execPath, [path.join(projectRoot, 'scripts', 'setup.js')], {
-      env: { ...process.env, LLM_GATEWAY_SETUP_ROOT: root }
+      env: { ...process.env, LLMWARD_SETUP_ROOT: root }
     });
     let stdout = '';
     let stderr = '';

@@ -3,8 +3,8 @@ const fs = require('fs');
 const path = require('path');
 const dotenv = require('dotenv');
 
-const root = process.env.LLM_GATEWAY_SETUP_ROOT
-  ? path.resolve(process.env.LLM_GATEWAY_SETUP_ROOT)
+const root = process.env.LLMWARD_SETUP_ROOT
+  ? path.resolve(process.env.LLMWARD_SETUP_ROOT)
   : path.join(__dirname, '..');
 const envPath = path.join(root, '.env');
 const dataDirectory = path.join(root, 'data');
