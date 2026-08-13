@@ -21,7 +21,9 @@ const USER_UPDATE_AUDIT_FIELDS = [
 ];
 const MODEL_CREATE_AUDIT_FIELDS = [
   'model_name', 'display_name', 'model_type', 'provider_id', 'max_tokens',
-  'max_concurrent_requests', 'input_cost_per_million', 'output_cost_per_million'
+  'max_concurrent_requests', 'input_cost_per_million', 'output_cost_per_million',
+  'context_window', 'default_temperature', 'default_top_p',
+  'default_presence_penalty', 'default_frequency_penalty', 'default_seed'
 ];
 const MODEL_UPDATE_AUDIT_FIELDS = [...MODEL_CREATE_AUDIT_FIELDS, 'is_active'];
 const PROVIDER_CREATE_AUDIT_FIELDS = [
@@ -79,6 +81,31 @@ function failureAuditMetadata(requestPath) {
 function positive(value, name) {
   if (!Number.isSafeInteger(value) || value <= 0) throw new ApiError(400, `${name} must be a positive safe integer`);
   return value;
+}
+
+function nullablePositive(value, name) {
+  return value === null ? null : positive(value, name);
+}
+
+function nullableRange(value, name, minimum, maximum) {
+  if (value === null) return null;
+  if (typeof value !== 'number' || !Number.isFinite(value) || value < minimum || value > maximum) {
+    throw new ApiError(400, `${name} must be null or a finite number from ${minimum} through ${maximum}`);
+  }
+  return value;
+}
+
+function nullableSafeInteger(value, name) {
+  if (value !== null && !Number.isSafeInteger(value)) {
+    throw new ApiError(400, `${name} must be null or a safe integer`);
+  }
+  return value;
+}
+
+function assertModelCapacity(maxTokens, contextWindow) {
+  if (contextWindow !== null && maxTokens > contextWindow) {
+    throw new ApiError(400, 'max_tokens must not exceed context_window');
+  }
 }
 
 function nonNegative(value, name) {
@@ -486,6 +513,8 @@ router.get('/models', (req, res, next) => {
       SELECT m.id, m.model_name, m.display_name, m.model_type, m.is_active, m.max_tokens,
              m.max_concurrent_requests,
              m.input_cost_per_million, m.output_cost_per_million,
+             m.context_window, m.default_temperature, m.default_top_p,
+             m.default_presence_penalty, m.default_frequency_penalty, m.default_seed,
              m.provider_id, p.provider_name, m.created_at
       FROM models m LEFT JOIN providers p ON p.id = m.provider_id ORDER BY m.id
     `).all().map((row) => ({ ...row, is_active: Boolean(row.is_active), created_at: iso(row.created_at) }));
@@ -502,21 +531,48 @@ router.post('/models', (req, res, next) => {
     const maxConcurrent = req.body.max_concurrent_requests === undefined ? 4 : positive(req.body.max_concurrent_requests, 'max_concurrent_requests');
     const inputPrice = req.body.input_cost_per_million === undefined ? null : nullablePrice(req.body.input_cost_per_million, 'input_cost_per_million');
     const outputPrice = req.body.output_cost_per_million === undefined ? null : nullablePrice(req.body.output_cost_per_million, 'output_cost_per_million');
+    const contextWindow = req.body.context_window === undefined ? null : nullablePositive(req.body.context_window, 'context_window');
+    const defaultTemperature = req.body.default_temperature === undefined
+      ? null
+      : nullableRange(req.body.default_temperature, 'default_temperature', 0, 2);
+    const defaultTopP = req.body.default_top_p === undefined
+      ? null
+      : nullableRange(req.body.default_top_p, 'default_top_p', 0, 1);
+    const defaultPresencePenalty = req.body.default_presence_penalty === undefined
+      ? null
+      : nullableRange(req.body.default_presence_penalty, 'default_presence_penalty', -2, 2);
+    const defaultFrequencyPenalty = req.body.default_frequency_penalty === undefined
+      ? null
+      : nullableRange(req.body.default_frequency_penalty, 'default_frequency_penalty', -2, 2);
+    const defaultSeed = req.body.default_seed === undefined
+      ? null
+      : nullableSafeInteger(req.body.default_seed, 'default_seed');
+    assertModelCapacity(maxTokens, contextWindow);
     const providerId = id(req.body.provider_id, 'provider_id');
     if (!db.prepare('SELECT id FROM providers WHERE id = ?').get(providerId)) throw new ApiError(400, 'provider_id is unknown');
     const result = db.prepare(`
       INSERT INTO models
         (model_name, display_name, model_type, provider_id, max_tokens,
-         max_concurrent_requests, input_cost_per_million, output_cost_per_million, created_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(modelName, displayName, modelType, providerId, maxTokens, maxConcurrent, inputPrice, outputPrice, new Date().toISOString());
+         max_concurrent_requests, input_cost_per_million, output_cost_per_million,
+         context_window, default_temperature, default_top_p,
+         default_presence_penalty, default_frequency_penalty, default_seed, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      modelName, displayName, modelType, providerId, maxTokens, maxConcurrent, inputPrice, outputPrice,
+      contextWindow, defaultTemperature, defaultTopP, defaultPresencePenalty,
+      defaultFrequencyPenalty, defaultSeed, new Date().toISOString()
+    );
     const modelId = Number(result.lastInsertRowid);
     audit('model.create', 'model', modelId, true, auditChangedFields(req.body, MODEL_CREATE_AUDIT_FIELDS));
     res.status(201).json({
       id: modelId, model_name: modelName, display_name: displayName,
       model_type: modelType, provider_id: providerId, max_tokens: maxTokens,
       max_concurrent_requests: maxConcurrent,
-      input_cost_per_million: inputPrice, output_cost_per_million: outputPrice, is_active: true
+      input_cost_per_million: inputPrice, output_cost_per_million: outputPrice,
+      context_window: contextWindow, default_temperature: defaultTemperature,
+      default_top_p: defaultTopP, default_presence_penalty: defaultPresencePenalty,
+      default_frequency_penalty: defaultFrequencyPenalty, default_seed: defaultSeed,
+      is_active: true
     });
   } catch (error) { next(error); }
 });
@@ -524,8 +580,15 @@ router.post('/models', (req, res, next) => {
 router.put('/models/:id', (req, res, next) => {
   try {
     const modelId = id(req.params.id, 'model id');
-    const existingModel = db.prepare('SELECT model_name FROM models WHERE id = ?').get(modelId);
+    const existingModel = db.prepare('SELECT model_name, max_tokens, context_window FROM models WHERE id = ?').get(modelId);
     if (!existingModel) throw new ApiError(404, 'Model not found');
+    const nextMaxTokens = Object.hasOwn(req.body, 'max_tokens')
+      ? positive(req.body.max_tokens, 'max_tokens')
+      : existingModel.max_tokens;
+    const nextContextWindow = Object.hasOwn(req.body, 'context_window')
+      ? nullablePositive(req.body.context_window, 'context_window')
+      : existingModel.context_window;
+    assertModelCapacity(nextMaxTokens, nextContextWindow);
     const fields = [];
     const values = [];
     const newModelName = req.body.model_name === undefined
@@ -535,7 +598,7 @@ router.put('/models/:id', (req, res, next) => {
     if (req.body.display_name !== undefined) { fields.push('display_name = ?'); values.push(nonEmpty(req.body.display_name, 'display_name')); }
     if (req.body.model_type !== undefined) { fields.push('model_type = ?'); values.push(identifier(req.body.model_type, 'model_type')); }
     if (req.body.is_active !== undefined) { fields.push('is_active = ?'); values.push(boolean(req.body.is_active, 'is_active')); }
-    if (req.body.max_tokens !== undefined) { fields.push('max_tokens = ?'); values.push(positive(req.body.max_tokens, 'max_tokens')); }
+    if (Object.hasOwn(req.body, 'max_tokens')) { fields.push('max_tokens = ?'); values.push(nextMaxTokens); }
     if (req.body.max_concurrent_requests !== undefined) {
       fields.push('max_concurrent_requests = ?'); values.push(positive(req.body.max_concurrent_requests, 'max_concurrent_requests'));
     }
@@ -546,6 +609,29 @@ router.put('/models/:id', (req, res, next) => {
     if (req.body.output_cost_per_million !== undefined) {
       fields.push('output_cost_per_million = ?');
       values.push(nullablePrice(req.body.output_cost_per_million, 'output_cost_per_million'));
+    }
+    if (Object.hasOwn(req.body, 'context_window')) {
+      fields.push('context_window = ?'); values.push(nextContextWindow);
+    }
+    if (Object.hasOwn(req.body, 'default_temperature')) {
+      fields.push('default_temperature = ?');
+      values.push(nullableRange(req.body.default_temperature, 'default_temperature', 0, 2));
+    }
+    if (Object.hasOwn(req.body, 'default_top_p')) {
+      fields.push('default_top_p = ?');
+      values.push(nullableRange(req.body.default_top_p, 'default_top_p', 0, 1));
+    }
+    if (Object.hasOwn(req.body, 'default_presence_penalty')) {
+      fields.push('default_presence_penalty = ?');
+      values.push(nullableRange(req.body.default_presence_penalty, 'default_presence_penalty', -2, 2));
+    }
+    if (Object.hasOwn(req.body, 'default_frequency_penalty')) {
+      fields.push('default_frequency_penalty = ?');
+      values.push(nullableRange(req.body.default_frequency_penalty, 'default_frequency_penalty', -2, 2));
+    }
+    if (Object.hasOwn(req.body, 'default_seed')) {
+      fields.push('default_seed = ?');
+      values.push(nullableSafeInteger(req.body.default_seed, 'default_seed'));
     }
     if (req.body.provider_id !== undefined) {
       const providerId = id(req.body.provider_id, 'provider_id');
@@ -571,7 +657,10 @@ router.put('/models/:id', (req, res, next) => {
     }).immediate();
     const row = db.prepare(`
       SELECT id, model_name, display_name, model_type, provider_id, max_tokens,
-             max_concurrent_requests, input_cost_per_million, output_cost_per_million, is_active, created_at
+             max_concurrent_requests, input_cost_per_million, output_cost_per_million,
+             context_window, default_temperature, default_top_p,
+             default_presence_penalty, default_frequency_penalty, default_seed,
+             is_active, created_at
       FROM models WHERE id = ?
     `).get(modelId);
     audit('model.update', 'model', modelId, true, auditChangedFields(req.body, MODEL_UPDATE_AUDIT_FIELDS));
