@@ -424,6 +424,116 @@ test('input masking changes only message text and preserves request extensions w
   assert.equal(body.messages[0].content, 'Input Secret');
 });
 
+test('model generation precedence applies stored defaults only to omitted own properties', async (t) => {
+  db.prepare(`UPDATE models SET context_window = 8192, default_temperature = 1.25,
+    default_top_p = 0, default_presence_penalty = -1.5,
+    default_frequency_penalty = 1.5, default_seed = 37
+    WHERE model_name = 'runtime-primary'`).run();
+  t.after(() => db.prepare(`UPDATE models SET context_window = NULL,
+    default_temperature = NULL, default_top_p = NULL,
+    default_presence_penalty = NULL, default_frequency_penalty = NULL,
+    default_seed = NULL WHERE model_name = 'runtime-primary'`).run());
+
+  const omitted = {
+    model: 'runtime-primary',
+    max_tokens: 99,
+    messages: [{ role: 'user', content: 'ordinary' }],
+    vendor_request: { nested: { passthrough: true }, values: [0, null, 'keep'] }
+  };
+  let response = await chat(primaryUser.token, omitted);
+  assert.equal(response.status, 200);
+  assert.deepEqual(receivedPayloads[0], {
+    ...omitted,
+    max_tokens: 6,
+    temperature: 1.25,
+    top_p: 0,
+    presence_penalty: -1.5,
+    frequency_penalty: 1.5,
+    seed: 37
+  });
+  assert.equal(Object.hasOwn(receivedPayloads[0], 'context_window'), false);
+  for (const field of ['temperature', 'top_p', 'presence_penalty', 'frequency_penalty', 'seed']) {
+    assert.equal(Object.hasOwn(omitted, field), false);
+  }
+
+  const explicitZeros = {
+    model: 'runtime-primary', messages: [{ role: 'user', content: 'ordinary' }],
+    temperature: 0, top_p: 0, presence_penalty: 0, frequency_penalty: 0, seed: 0
+  };
+  response = await chat(primaryUser.token, explicitZeros);
+  assert.equal(response.status, 200);
+  for (const field of ['temperature', 'top_p', 'presence_penalty', 'frequency_penalty', 'seed']) {
+    assert.equal(receivedPayloads[1][field], 0);
+  }
+
+  const explicitNulls = {
+    model: 'runtime-primary', messages: [{ role: 'user', content: 'ordinary' }],
+    temperature: null, top_p: null, presence_penalty: null, frequency_penalty: null, seed: null
+  };
+  response = await chat(primaryUser.token, explicitNulls);
+  assert.equal(response.status, 200);
+  for (const field of ['temperature', 'top_p', 'presence_penalty', 'frequency_penalty', 'seed']) {
+    assert.equal(Object.hasOwn(receivedPayloads[2], field), true);
+    assert.equal(receivedPayloads[2][field], null);
+  }
+
+  response = await chat(primaryUser.token, {
+    model: 'runtime-secondary', messages: [{ role: 'user', content: 'ordinary' }]
+  });
+  assert.equal(response.status, 200);
+  for (const field of ['temperature', 'top_p', 'presence_penalty', 'frequency_penalty', 'seed']) {
+    assert.equal(Object.hasOwn(receivedPayloads[3], field), false);
+  }
+});
+
+
+test('streaming applies the same model generation precedence', async (t) => {
+  db.prepare(`UPDATE models SET default_temperature = 1.25, default_seed = 0
+    WHERE model_name = 'runtime-primary'`).run();
+  t.after(() => db.prepare(`UPDATE models SET default_temperature = NULL, default_seed = NULL
+    WHERE model_name = 'runtime-primary'`).run());
+
+  const response = await fetch(`${baseUrl}/v1/chat/completions`, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${primaryUser.token}`,
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify({
+      model: 'runtime-primary', stream: true, max_tokens: 99, temperature: null,
+      messages: [{ role: 'user', content: 'ordinary' }]
+    })
+  });
+
+  assert.equal(response.status, 200);
+  assert.ok((await response.text()).includes('[DONE]'));
+  assert.equal(receivedPayloads[0].temperature, null);
+  assert.equal(receivedPayloads[0].seed, 0);
+  assert.equal(receivedPayloads[0].max_tokens, 6);
+});
+
+test('model defaults participate in the post-merge 1 MiB request-size limit', async (t) => {
+  db.prepare("UPDATE models SET default_seed = 0 WHERE model_name = 'runtime-primary'").run();
+  t.after(() => db.prepare(
+    "UPDATE models SET default_seed = NULL WHERE model_name = 'runtime-primary'"
+  ).run());
+  const body = {
+    model: 'runtime-primary',
+    messages: [{ role: 'user', content: 'ordinary' }],
+    vendor_padding: ''
+  };
+  const targetBytes = 1024 * 1024 - 1;
+  const baseBytes = Buffer.byteLength(JSON.stringify({ ...body, max_tokens: 6 }), 'utf8');
+  body.vendor_padding = 'x'.repeat(targetBytes - baseBytes);
+  assert.equal(Buffer.byteLength(JSON.stringify({ ...body, max_tokens: 6 }), 'utf8'), targetBytes);
+
+  const response = await chat(primaryUser.token, body);
+
+  assert.equal(response.status, 413);
+  assert.equal(response.body.code, 'request_too_large');
+  assert.equal(providerCalls, 0);
+  assert.equal(db.prepare('SELECT COUNT(*) FROM quota_reservations').pluck().get(), 0);
+});
 test('expanded masked payloads over 1 MiB fail before provider dispatch and release the reservation once', async () => {
   addFilter({ patterns: ['a'], inputAction: 'mask', global: true });
   const response = await chat(primaryUser.token, {

@@ -130,7 +130,7 @@ async function discoverModels(providerId) {
 
 function getActiveModelsWithProviders() {
   return db.prepare(`
-    SELECT m.id, m.model_name, m.display_name, m.model_type, m.max_tokens,
+    SELECT m.id, m.model_name, m.display_name, m.model_type, m.max_tokens, m.context_window,
            p.id AS provider_id, p.provider_name, p.display_name AS provider_display_name
     FROM models m
     JOIN providers p ON p.id = m.provider_id AND p.is_active = 1

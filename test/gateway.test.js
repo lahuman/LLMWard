@@ -361,6 +361,30 @@ test('user creation authenticates and user lists never disclose tokens', async (
   assert.equal(Object.hasOwn(users.body[0], 'api_token'), false);
 });
 
+test('public model listing exposes context metadata but not generation defaults', async (t) => {
+  db.prepare(`UPDATE models SET context_window = 8192, default_temperature = 1.25,
+    default_top_p = 0.75, default_presence_penalty = -1,
+    default_frequency_penalty = 1, default_seed = 37
+    WHERE model_name = 'standard'`).run();
+  t.after(() => db.prepare(`UPDATE models SET context_window = NULL,
+    default_temperature = NULL, default_top_p = NULL,
+    default_presence_penalty = NULL, default_frequency_penalty = NULL,
+    default_seed = NULL WHERE model_name = 'standard'`).run());
+  const user = await createUser('public-model-metadata-user', []);
+  const response = await request('/v1/models', {
+    headers: { Authorization: `Bearer ${user.token}` }
+  });
+  const configured = response.body.find((model) => model.id === 'standard');
+  const unknown = response.body.find((model) => model.id === 'input-limit');
+  assert.equal(configured.max_tokens, 8);
+  assert.equal(configured.context_window, 8192);
+  assert.equal(unknown.context_window, null);
+  for (const field of ['default_temperature', 'default_top_p',
+    'default_presence_penalty', 'default_frequency_penalty', 'default_seed']) {
+    assert.equal(Object.hasOwn(configured, field), false);
+  }
+});
+
 test('new users default both daily token quotas to unlimited', async () => {
   const created = await admin('/admin/users', {
     method: 'POST', body: { username: 'default-unlimited-user', allowed_models: ['standard'] }

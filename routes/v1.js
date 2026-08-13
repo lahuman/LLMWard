@@ -13,6 +13,13 @@ const piiFilter = require('../services/pii-filter');
 
 const router = express.Router();
 const activeRequests = new Set();
+const MODEL_GENERATION_DEFAULTS = Object.freeze([
+  ['temperature', 'default_temperature'],
+  ['top_p', 'default_top_p'],
+  ['presence_penalty', 'default_presence_penalty'],
+  ['frequency_penalty', 'default_frequency_penalty'],
+  ['seed', 'default_seed']
+]);
 const IDENTIFIER = /^[a-z0-9][a-z0-9_.:/-]{0,199}$/;
 
 function modelPermissions(serialized) {
@@ -42,7 +49,8 @@ router.get('/models', validateToken, (req, res, next) => {
         name: model.display_name,
         type: model.model_type,
         provider: model.provider_name,
-        max_tokens: model.max_tokens
+        max_tokens: model.max_tokens,
+        context_window: model.context_window
       }));
     res.json(models);
   } catch (error) {
@@ -60,7 +68,9 @@ function validateModelAccess(req, res, next) {
     if (!permissions) throw new ApiError(403, 'Model permissions are invalid');
 
     const model = db.prepare(`
-      SELECT m.id AS model_id, m.model_name, m.max_tokens, p.id AS provider_id, p.provider_name,
+      SELECT m.id AS model_id, m.model_name, m.max_tokens,
+             m.default_temperature, m.default_top_p, m.default_presence_penalty,
+             m.default_frequency_penalty, m.default_seed, p.id AS provider_id, p.provider_name,
              p.base_url, p.auth_type, p.api_key_env_name, p.stored_api_key,
              m.input_cost_per_million, m.output_cost_per_million,
              m.max_concurrent_requests,
@@ -132,12 +142,18 @@ router.post('/chat/completions', validateToken, validateModelAccess, async (req,
       filteredBody = transformed.body;
       piiContext = transformed.context;
     }
+    const payload = { ...filteredBody };
+    for (const [requestField, modelField] of MODEL_GENERATION_DEFAULTS) {
+      if (!Object.hasOwn(filteredBody, requestField) && req.gatewayModel[modelField] !== null) {
+        payload[requestField] = req.gatewayModel[modelField];
+      }
+    }
     const streaming = req.body.stream === true;
     const requestLifetimeMs = streaming
       ? config.streamMaxDurationMs
       : config.providerTimeoutMs;
     reservation = reserveQuota(req.user, req.body.max_tokens, req.gatewayModel.max_tokens, requestLifetimeMs);
-    const payload = { ...filteredBody, max_tokens: reservation.maxTokens };
+    payload.max_tokens = reservation.maxTokens;
     contentFilters.assertRequestSize(payload);
     const serializedPayload = JSON.stringify(payload);
     providerTimeout = setTimeout(abortForTimeout, config.providerTimeoutMs);
