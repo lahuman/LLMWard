@@ -27,3 +27,28 @@ Streaming 공급자가 마지막 chunk에 usage를 포함하지 않으면 Gatewa
 필터 패턴은 정규식이 아닌 Unicode 대소문자 비구분 리터럴 부분 문자열이며 치환문은 `[FILTERED]`로 고정됩니다. 임의 코드, 정규식, 외부 정책 서버는 지원하지 않습니다. 새 필터는 기본 비활성이며, 전체 적용이 아닌 필터에 모델 할당이 없으면 no-op입니다.
 
 `content_filtered` applies only after matching those supported input text fields. Its `filter_name` identifies the first matching active policy in database ID order; the response never includes a pattern or matched text.
+
+## Built-in Korean PII / secret filter compatibility
+
+This filter covers Korean resident and foreigner registration numbers, payment
+card numbers, Korean phone numbers, email addresses, IPv4 addresses, and
+distinctive secrets such as private-key blocks. Resident identifiers use modern
+date/type validation without a legacy checksum, including the October 12, 2020
+resident random-tail change documented by the Ministry of the Interior and
+Safety: https://www.mois.go.kr/frt/bbs/type002/commonSelectBoardArticle.do?bbsId=BBSMSTR_000000000205&nttId=75077
+Foreigner identifiers use their separate checksum. Supported Korean telephone
+prefixes are `010`, `02`, `031` through `033`, `041` through `044`, `051` through `055`, `061` through `064`,
+and `070`.
+
+It does not detect names, free-form addresses, bank accounts, business
+registration numbers, general URLs, attachments, tool or function arguments,
+or provider-generated raw PII. The filter examines only documented chat text
+fields and is not general DLP.
+
+SSE without an active mapping or literal output filter is byte-transparent.
+With a mapping or literal filter active, SSE is processed strictly by supported
+content field and event boundaries. Invalid JSON data events, an event over
+1 MiB including delimiters, or filtering failures fail closed: before response
+headers the gateway returns HTTP 502 `filter_processing_failed`; after headers
+it stops the upstream request and closes the connection. This keeps the error
+boundary safe without exposing unfiltered content.

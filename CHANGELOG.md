@@ -3,6 +3,9 @@
 ## Unreleased
 
 - Added schema version 3 declarative literal content filters with global or model scope, input block/mask, and non-streaming or SSE output masking.
+- Added built-in Korean PII pseudonymization and distinctive secret redaction.
+- Added global default-off administration and request-local JSON/SSE restoration.
+- Documented intentional output-DLP and general-DLP exclusions.
 - Added filter administration API/dashboard support with inactive defaults, fail-closed errors, privacy-preserving audit/request records, and provider-usage accounting on post-response failures.
 - Documented client-safe `filter_name` attribution for input blocks without disclosing patterns or matched content.
 

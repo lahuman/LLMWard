@@ -24,6 +24,8 @@ let db;
 let applicationLogger;
 let contentFilters;
 let originalApplyOutputFilters;
+let piiFilter;
+let originalPiiMethods;
 let usageService;
 let originalRecordFailure;
 let originalReleaseReservation;
@@ -34,6 +36,7 @@ let releaseHeldProvider;
 let primaryModelId;
 let secondaryModelId;
 let heldModelId;
+let providerId;
 let primaryUser;
 let restrictedUser;
 
@@ -125,6 +128,17 @@ function requestLogs() {
   `).all();
 }
 
+
+function setBuiltInPiiActive(active = true) {
+  db.prepare(
+    'INSERT INTO app_settings ' +
+    '(setting_key, setting_value, updated_at) ' +
+    "VALUES ('built_in_pii_filter_active', ?, ?) " +
+    'ON CONFLICT(setting_key) DO UPDATE SET ' +
+    'setting_value = excluded.setting_value, ' +
+    'updated_at = excluded.updated_at'
+  ).run(active ? '1' : '0', new Date().toISOString());
+}
 before(async () => {
   providerServer = http.createServer(async (req, res) => {
     if (req.url !== '/chat/completions' || req.method !== 'POST') {
@@ -141,6 +155,13 @@ before(async () => {
       res.writeHead(503, { 'Content-Type': 'application/json' });
       return res.end(JSON.stringify({ error: 'private upstream failure' }));
     }
+    if (payload.force_timeout === true) {
+      providerEvents.emit('timeout:started');
+      await once(res, 'close');
+      providerEvents.emit('timeout:closed');
+      return;
+    }
+
 
     if (payload.model === 'runtime-held') {
       const gate = new Promise((resolve) => { releaseHeldProvider = resolve; });
@@ -153,6 +174,13 @@ before(async () => {
       return res.end('data: {"choices":[{"delta":{"content":"raw-secret"}}]}\r\n\r\ndata: [DONE]\r\n\r\n');
     }
 
+    if (payload.echo_filtered_input === true) {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      return res.end(JSON.stringify({
+        choices: [{ message: { content: payload.messages[0].content } }],
+        usage: { prompt_tokens: 3, completion_tokens: 2, total_tokens: 5 }
+      }));
+    }
     const body = {
       id: 'runtime-response',
       model: payload.model,
@@ -183,6 +211,8 @@ before(async () => {
   originalApplyOutputFilters = contentFilters.applyOutputFilters;
   usageService = require('../services/usage');
   originalRecordFailure = usageService.recordFailure;
+  piiFilter = require('../services/pii-filter');
+  originalPiiMethods = { ...piiFilter };
   originalReleaseReservation = usageService.releaseReservation;
   gatewayServer = http.createServer(app);
   await listen(gatewayServer);
@@ -199,6 +229,7 @@ before(async () => {
   });
   assert.equal(provider.status, 201);
 
+  providerId = provider.body.id;
   for (const name of ['runtime-primary', 'runtime-secondary', 'runtime-held']) {
     const model = await admin('/admin/models', {
       method: 'POST',
@@ -226,12 +257,14 @@ beforeEach(() => {
   contentFilters.applyOutputFilters = originalApplyOutputFilters;
   usageService.recordFailure = originalRecordFailure;
   usageService.releaseReservation = originalReleaseReservation;
+  Object.assign(piiFilter, originalPiiMethods);
   db.exec(`
     DELETE FROM content_filter_models;
     DELETE FROM content_filters;
     DELETE FROM quota_reservations;
     DELETE FROM usage_logs;
     DELETE FROM request_logs;
+    DELETE FROM app_settings WHERE setting_key = 'built_in_pii_filter_active';
   `);
   providerCalls = 0;
   receivedPayloads = [];
@@ -241,6 +274,7 @@ beforeEach(() => {
 
 after(async () => {
   if (contentFilters) contentFilters.applyOutputFilters = originalApplyOutputFilters;
+  if (piiFilter) Object.assign(piiFilter, originalPiiMethods);
   if (usageService) {
     usageService.recordFailure = originalRecordFailure;
     usageService.releaseReservation = originalReleaseReservation;
@@ -525,4 +559,172 @@ test('streaming without an output filter retains the existing byte-transparent r
     await response.text(),
     'data: {"choices":[{"delta":{"content":"raw-secret"}}]}\r\n\r\ndata: [DONE]\r\n\r\n'
   );
+});
+
+test('built-in PII default-off preserves input while active restores PII and redacts secrets', async () => {
+  const resident = '000229-3123456';
+  const email = 'synthetic.user@example.test';
+  const secret = 'AKIAABCDEFGHIJKLMNOP';
+  const body = {
+    model: 'runtime-primary',
+    echo_filtered_input: true,
+    messages: [{ role: 'user', content: `${resident} ${email} ${email} ${secret}` }]
+  };
+
+  let response = await chat(primaryUser.token, body);
+  assert.equal(response.status, 200);
+  assert.equal(receivedPayloads[0].messages[0].content, body.messages[0].content);
+
+  providerCalls = 0;
+  receivedPayloads = [];
+  setBuiltInPiiActive();
+  response = await chat(primaryUser.token, body);
+  assert.equal(response.status, 200);
+  const providerContent = receivedPayloads[0].messages[0].content;
+  assert.equal(providerContent.includes(resident), false);
+  assert.equal(providerContent.includes(email), false);
+  assert.equal(providerContent.includes(secret), false);
+  const tokens = providerContent.match(/\[\[LLMWARD:[^\]]+\]\]/gu);
+  assert.equal(tokens.length >= 3, true);
+  assert.equal(tokens[1], tokens[2]);
+  assert.equal(response.body.choices[0].message.content.includes(resident), true);
+  assert.equal(response.body.choices[0].message.content.includes(email), true);
+  assert.equal(response.body.choices[0].message.content.includes(secret), false);
+  assert.equal(response.body.choices[0].message.content.includes('[FILTERED]'), true);
+  assert.equal(response.body.choices[0].message.content.includes('[[LLMWARD:'), false);
+});
+
+test('built-in PII runs after literal input masks and clears its request-local context', async () => {
+  const resident = '000229-3123456';
+  addFilter({ patterns: [resident], inputAction: 'mask', global: true });
+  setBuiltInPiiActive();
+  let cleared = [];
+  piiFilter.clearContext = (context) => { cleared.push(context); };
+
+  const response = await chat(primaryUser.token, {
+    model: 'runtime-primary', echo_filtered_input: true,
+    messages: [{ role: 'user', content: resident }]
+  });
+  assert.equal(response.status, 200);
+  assert.equal(receivedPayloads[0].messages[0].content, '[FILTERED]');
+  assert.deepEqual(cleared, [null]);
+});
+test('built-in PII contexts cross route finally once on every non-stream terminal path', async () => {
+  const resident = '000229-3123456';
+  const secret = 'AKIAABCDEFGHIJKLMNOP';
+  const nativeClear = originalPiiMethods.clearContext;
+  const cleared = [];
+  piiFilter.clearContext = (context) => {
+    if (context !== null) cleared.push(context);
+    nativeClear(context);
+  };
+  setBuiltInPiiActive();
+  const { state } = require('../services/limits');
+  const assertReleased = () => {
+    assert.equal(db.prepare('SELECT COUNT(*) FROM quota_reservations').pluck().get(), 0);
+    assert.equal(state().users[primaryUser.id], undefined);
+    assert.equal(state().models['runtime-primary'], undefined);
+    assert.equal(state().providers[providerId], undefined);
+  };
+
+  let response = await chat(primaryUser.token, {
+    model: 'runtime-primary', echo_filtered_input: true,
+    messages: [{ role: 'user', content: resident + ' ' + secret }]
+  });
+  assert.equal(response.status, 200);
+  assertReleased();
+
+  response = await chat(primaryUser.token, {
+    model: 'runtime-primary', force_provider_error: true,
+    messages: [{ role: 'user', content: resident }]
+  });
+  assert.equal(response.status, 502);
+  assert.equal(response.body.code, 'provider_http_error');
+  assertReleased();
+
+  const nativeOutput = originalPiiMethods.applyOutputFilter;
+  piiFilter.applyOutputFilter = () => { throw new Error('private output marker'); };
+  response = await chat(primaryUser.token, {
+    model: 'runtime-primary', messages: [{ role: 'user', content: resident }]
+  });
+  piiFilter.applyOutputFilter = nativeOutput;
+  assert.equal(response.status, 502);
+  assert.equal(response.body.code, 'filter_processing_failed');
+  assertReleased();
+
+  const callsBeforeSizeFailure = providerCalls;
+  response = await chat(primaryUser.token, {
+    model: 'runtime-primary',
+    messages: [{ role: 'user', content: (secret + ' ').repeat(16000) }]
+  });
+  assert.equal(response.status, 413);
+  assert.equal(response.body.code, 'request_too_large');
+  assert.equal(providerCalls, callsBeforeSizeFailure);
+  assertReleased();
+
+  assert.equal(cleared.length, 4);
+  assert.equal(new Set(cleared).size, 4);
+});
+
+test('built-in PII unique and maximum-density limits fail before provider and release resources', async () => {
+  setBuiltInPiiActive();
+  const { state } = require('../services/limits');
+  const cases = [
+    Array.from({ length: 201 }, (_, index) => 'unique-' + index + '@example.test').join(' '),
+    'AKIAABCDEFGHIJKLMNOP '.repeat(16000)
+  ];
+  for (const content of cases) {
+    const response = await chat(primaryUser.token, {
+      model: 'runtime-primary', messages: [{ role: 'user', content }]
+    });
+    assert.equal(response.status, 413);
+    assert.equal(response.body.code, 'request_too_large');
+  }
+  assert.equal(providerCalls, 0);
+  assert.deepEqual(requestLogs(), cases.map(() => ({
+    status: 'failure', error_type: 'filter', input_tokens: 0, output_tokens: 0, total_tokens: 0
+  })));
+  assert.equal(db.prepare('SELECT COUNT(*) FROM quota_reservations').pluck().get(), 0);
+  assert.equal(state().users[primaryUser.id], undefined);
+  assert.equal(state().models['runtime-primary'], undefined);
+  assert.equal(state().providers[providerId], undefined);
+});
+
+test('built-in PII provider timeout clears context once and releases every resource', {
+  timeout: 3000
+}, async (t) => {
+  const config = require('../config');
+  const previousTimeout = config.providerTimeoutMs;
+  config.providerTimeoutMs = 200;
+  t.after(() => { config.providerTimeoutMs = previousTimeout; });
+  setBuiltInPiiActive();
+  const nativeClear = originalPiiMethods.clearContext;
+  const cleared = [];
+  piiFilter.clearContext = (context) => {
+    if (context !== null) cleared.push(context);
+    nativeClear(context);
+  };
+  const resident = '000229-3123456';
+  const started = once(providerEvents, 'timeout:started', { signal: AbortSignal.timeout(2000) });
+  const closed = once(providerEvents, 'timeout:closed', { signal: AbortSignal.timeout(2000) });
+  const responsePromise = chat(primaryUser.token, {
+    model: 'runtime-primary', force_timeout: true,
+    messages: [{ role: 'user', content: resident }]
+  });
+  await started;
+  const response = await responsePromise;
+  await closed;
+  assert.equal(response.status, 504);
+  assert.equal(response.body.code, 'provider_timeout');
+  assert.equal(receivedPayloads[0].messages[0].content.includes(resident), false);
+  assert.match(receivedPayloads[0].messages[0].content, /^\[\[LLMWARD:/u);
+  assert.equal(cleared.length, 1);
+  assert.deepEqual(requestLogs(), [{
+    status: 'failure', error_type: 'timeout', input_tokens: 0, output_tokens: 0, total_tokens: 0
+  }]);
+  const { state } = require('../services/limits');
+  assert.equal(db.prepare('SELECT COUNT(*) FROM quota_reservations').pluck().get(), 0);
+  assert.equal(state().users[primaryUser.id], undefined);
+  assert.equal(state().models['runtime-primary'], undefined);
+  assert.equal(state().providers[providerId], undefined);
 });

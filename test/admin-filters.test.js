@@ -82,6 +82,7 @@ beforeEach(() => {
   if (!db) return;
   db.prepare('DELETE FROM content_filters').run();
   db.prepare("DELETE FROM audit_logs WHERE target_type = 'filter'").run();
+  db.prepare("DELETE FROM app_settings WHERE setting_key = 'built_in_pii_filter_active'").run();
 });
 
 after(async () => {
@@ -212,7 +213,106 @@ test('filter routes enforce the organization-wide 200-pattern limit', async () =
   assert.equal((await admin('/admin/filters')).body.length, 2);
 });
 
+
+test('built-in PII administration authenticates first and exposes reviewed metadata only', async () => {
+  const invalid = { is_active: 'yes', extra: true };
+  for (const method of ['GET', 'PUT']) {
+    const result = await request('/admin/filters/built-in-pii', {
+      method,
+      ...(method === 'PUT' ? { body: invalid } : {})
+    });
+    assert.equal(result.status, 401);
+  }
+  assert.equal(db.prepare(
+    "SELECT COUNT(*) AS count FROM app_settings WHERE setting_key = 'built_in_pii_filter_active'"
+  ).get().count, 0);
+  assert.equal(db.prepare("SELECT COUNT(*) AS count FROM audit_logs WHERE target_type = 'filter'").get().count, 0);
+
+  const result = await admin('/admin/filters/built-in-pii');
+  assert.equal(result.status, 200);
+  assert.deepEqual(Object.keys(result.body), ['id', 'name', 'is_active', 'is_global', 'rules']);
+  assert.equal(result.body.id, 'built-in-pii');
+  assert.equal(result.body.name, 'Built-in Korean PII & Secret Filter');
+  assert.equal(result.body.is_active, false);
+  assert.equal(result.body.is_global, true);
+  assert.equal(db.prepare(
+    "SELECT COUNT(*) AS count FROM app_settings WHERE setting_key = 'built_in_pii_filter_active'"
+  ).get().count, 0);
+  assert.ok(result.body.rules.length > 0);
+  for (const rule of result.body.rules) {
+    assert.deepEqual(Object.keys(rule), ['id', 'label', 'mode']);
+    for (const field of ['pattern', 'source', 'scan', 'validate', 'validator']) {
+      assert.equal(Object.hasOwn(rule, field), false);
+    }
+  }
+  assert.deepEqual((await admin('/admin/filters')).body, []);
+});
+
+test('built-in PII administration validates, repairs storage, and audits atomically', async (t) => {
+  for (const body of [{}, { is_active: 1 }, { is_active: 'true' }, { is_active: true, extra: false }]) {
+    assert.equal((await admin('/admin/filters/built-in-pii', { method: 'PUT', body })).status, 400);
+  }
+
+  db.prepare(
+    "INSERT INTO app_settings VALUES ('built_in_pii_filter_active', 'invalid-private-value', ?)"
+  ).run(new Date().toISOString());
+  const corrupt = await admin('/admin/filters/built-in-pii');
+  assert.equal(corrupt.status, 500);
+  assert.equal(corrupt.body.code, 'filter_configuration_invalid');
+  assert.equal(JSON.stringify(corrupt.body).includes('invalid-private-value'), false);
+
+  const enabled = await admin('/admin/filters/built-in-pii', {
+    method: 'PUT', body: { is_active: true }
+  });
+  assert.equal(enabled.status, 200);
+  assert.equal(db.prepare(
+    "SELECT setting_value FROM app_settings WHERE setting_key = 'built_in_pii_filter_active'"
+  ).pluck().get(), '1');
+  assert.deepEqual(db.prepare(`
+    SELECT action, target_type, target_id, success, changed_fields
+    FROM audit_logs WHERE action = 'filter.update' AND target_id = 'built-in-pii'
+  `).all(), [{
+    action: 'filter.update', target_type: 'filter', target_id: 'built-in-pii', success: 1,
+    changed_fields: '["is_active"]'
+  }]);
+
+  const disabled = await admin('/admin/filters/built-in-pii', {
+    method: 'PUT', body: { is_active: false }
+  });
+  assert.equal(disabled.status, 200);
+  assert.equal(db.prepare(
+    "SELECT setting_value FROM app_settings WHERE setting_key = 'built_in_pii_filter_active'"
+  ).pluck().get(), '0');
+
+  db.prepare("DELETE FROM audit_logs WHERE target_type = 'filter'").run();
+  db.exec(`
+    CREATE TRIGGER fail_built_in_pii_audit
+    BEFORE INSERT ON audit_logs
+    WHEN NEW.action = 'filter.update'
+     AND NEW.target_id = 'built-in-pii'
+    BEGIN
+      SELECT RAISE(ABORT, 'synthetic audit failure');
+    END;
+  `);
+  t.after(() => db.exec('DROP TRIGGER IF EXISTS fail_built_in_pii_audit'));
+  const failed = await admin('/admin/filters/built-in-pii', {
+    method: 'PUT', body: { is_active: true }
+  });
+  assert.equal(failed.status, 500);
+  assert.equal(db.prepare(
+    "SELECT setting_value FROM app_settings WHERE setting_key = 'built_in_pii_filter_active'"
+  ).pluck().get(), '0');
+  assert.deepEqual(db.prepare(`
+    SELECT action, target_type, target_id, success, changed_fields
+    FROM audit_logs WHERE action = 'filter.change' AND target_id = 'built-in-pii'
+  `).all(), [{
+    action: 'filter.change', target_type: 'filter', target_id: 'built-in-pii', success: 0,
+    changed_fields: '[]'
+  }]);
+});
+
 test('dashboard exposes an accessible safe-DOM filter editor without rendering pattern values in the list', () => {
+
   const html = fs.readFileSync(path.join(__dirname, '..', 'public', 'admin-dashboard.html'), 'utf8');
   const script = fs.readFileSync(path.join(__dirname, '..', 'public', 'admin-dashboard.js'), 'utf8');
   assert.match(html, /data-tab="filters"/);

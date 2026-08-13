@@ -21,6 +21,11 @@ db.exec(`
     changed_fields TEXT NOT NULL,
     created_at TEXT NOT NULL
   );
+  CREATE TABLE app_settings (
+    setting_key TEXT PRIMARY KEY,
+    setting_value TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+  );
   CREATE TABLE content_filters (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     name TEXT UNIQUE NOT NULL,
@@ -105,6 +110,7 @@ beforeEach(() => {
     DELETE FROM content_filters;
     DELETE FROM models;
     DELETE FROM audit_logs;
+    DELETE FROM app_settings;
     DELETE FROM sqlite_sequence;
   `);
 });
@@ -365,6 +371,7 @@ test('effective snapshot keeps ordered immutable input-block policy metadata', (
 
   const snapshot = getEffectiveFilterSnapshot(requestedModel);
   assert.deepEqual(snapshot, {
+    built_in_pii_filter_active: false,
     input_block_patterns: ['global', 'assigned-block'],
     input_mask_patterns: ['assigned'],
     output_mask_patterns: ['assigned'],
@@ -374,6 +381,7 @@ test('effective snapshot keeps ordered immutable input-block policy metadata', (
     ]
   });
   const serialized = JSON.stringify(snapshot);
+
   for (const privateValue of ['assigned-name-must-not-leak', 'other-only', 'no-op', 'inactive']) {
     assert.equal(serialized.includes(privateValue), false);
   }
@@ -384,6 +392,26 @@ test('effective snapshot keeps ordered immutable input-block policy metadata', (
   assert.equal(Object.isFrozen(snapshot.input_block_policies[0].patterns), true);
 });
 
+test('built-in PII activation is a frozen fail-closed snapshot setting', () => {
+  const modelId = insertModel('built-in-pii-setting');
+  assert.equal(getEffectiveFilterSnapshot(modelId).built_in_pii_filter_active, false);
+  db.prepare("INSERT INTO app_settings VALUES ('built_in_pii_filter_active', '0', ?)").run(new Date().toISOString());
+  assert.equal(getEffectiveFilterSnapshot(modelId).built_in_pii_filter_active, false);
+  db.prepare("UPDATE app_settings SET setting_value = '1' WHERE setting_key = 'built_in_pii_filter_active'").run();
+  const active = getEffectiveFilterSnapshot(modelId);
+  assert.equal(active.built_in_pii_filter_active, true);
+  assert.equal(Object.isFrozen(active), true);
+  for (const value of ['', 'true', '2', '01']) {
+    db.prepare("UPDATE app_settings SET setting_value = ? WHERE setting_key = 'built_in_pii_filter_active'").run(value);
+    apiError(() => getEffectiveFilterSnapshot(modelId), { status: 500, code: 'filter_configuration_invalid' });
+  }
+  db.exec('DROP TABLE app_settings');
+  try {
+    assert.throws(() => getEffectiveFilterSnapshot(modelId), (error) => error.code === 'SQLITE_ERROR');
+  } finally {
+    db.exec('CREATE TABLE app_settings (setting_key TEXT PRIMARY KEY, setting_value TEXT NOT NULL, updated_at TEXT NOT NULL)');
+  }
+});
 test('stored configuration corruption fails closed with a fixed identifier-free error', () => {
   db.prepare(`
     INSERT INTO content_filters

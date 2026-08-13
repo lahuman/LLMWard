@@ -16,6 +16,7 @@ class FakeNode extends EventTarget {
     this.textContent = '';
     this.value = '';
     this.type = '';
+    this.checked = false;
     this.classList = {
       add() {},
       remove() {},
@@ -92,6 +93,14 @@ function createDashboardHarness({ storedKey = '', fetchOverride } = {}) {
   filterForm.elements.isGlobal = new FakeNode();
   const statsForm = new FakeForm({ range: '24h', start: '', end: '' });
   const requests = [];
+  const builtInPiiForm = new FakeForm();
+  builtInPiiForm.elements.isActive = new FakeNode();
+  let builtInPiiActive = false;
+  const builtInPiiRules = [
+    { id: 'resident', label: 'Resident identifier', mode: 'restore' },
+    { id: 'private_key', label: '<script>not markup</script>', mode: 'redact' },
+  ];
+
   const document = {
     getElementById(id) {
       if (!elements.has(id)) elements.set(id, new FakeNode());
@@ -100,8 +109,10 @@ function createDashboardHarness({ storedKey = '', fetchOverride } = {}) {
     querySelectorAll() {
       return [];
     },
-    createElement() {
-      return new FakeNode();
+    createElement(tagName) {
+      const node = new FakeNode();
+      node.tagName = String(tagName).toUpperCase();
+      return node;
     },
     createTextNode(text) {
       const node = new FakeNode();
@@ -110,6 +121,9 @@ function createDashboardHarness({ storedKey = '', fetchOverride } = {}) {
     },
   };
   elements.set('provider-form', providerForm);
+  elements.set('built-in-pii-form', builtInPiiForm);
+  elements.set('built-in-pii-rules', new FakeNode());
+  elements.set('built-in-pii-state', new FakeNode());
   elements.set('model-form', modelForm);
   elements.set('filter-form', filterForm);
   elements.set('stats-form', statsForm);
@@ -138,6 +152,10 @@ function createDashboardHarness({ storedKey = '', fetchOverride } = {}) {
       if (overridden !== undefined) return overridden;
       if (route === '/admin/providers' && options.method === 'POST') return response({});
       if (route === '/admin/users') return response([]);
+      if (route === '/admin/filters/built-in-pii' && options.method === 'PUT') {
+        builtInPiiActive = JSON.parse(options.body).is_active;
+      }
+      if (route === '/admin/filters/built-in-pii') return response({ id: 'built-in-pii', name: 'Built-in Korean PII & Secret Filter', is_active: builtInPiiActive, is_global: true, rules: builtInPiiRules });
       if (route === '/admin/models') return response([]);
       if (route === '/admin/providers') return response([]);
       if (route === '/admin/filters') return response([]);
@@ -159,6 +177,11 @@ function createDashboardHarness({ storedKey = '', fetchOverride } = {}) {
     providerForm,
     requests,
     status: document.getElementById('status'),
+    builtInPiiForm,
+    builtInPiiRules: document.getElementById('built-in-pii-rules'),
+    get builtInPiiActive() { return builtInPiiActive; },
+    builtInPiiState: document.getElementById('built-in-pii-state'),
+
     usersContent: document.getElementById('users-content'),
     window: context.window,
   };
@@ -181,6 +204,36 @@ async function settle() {
   await new Promise((resolve) => setImmediate(resolve));
   await new Promise((resolve) => setImmediate(resolve));
 }
+test('filters tab keeps the built-in PII filter before its sibling usage guide', () => {
+  const html = fs.readFileSync(path.join(__dirname, '..', 'public', 'admin-dashboard.html'), 'utf8');
+  assert.match(html, /<section id="tab-filters"[^>]*>\s*<section id="built-in-pii-filter"[\s\S]*?<\/section>\s*<section id="filter-usage-guide"/);
+});
+
+test('built-in PII filter saves its active state and renders rules as safe list items', async () => {
+  const harness = createDashboardHarness();
+  harness.builtInPiiForm.elements.isActive.checked = true;
+  harness.builtInPiiForm.dispatchEvent(new Event('submit', { cancelable: true }));
+  await settle();
+  assert.equal(harness.builtInPiiActive, true);
+  assert.equal(harness.builtInPiiState.textContent, 'Active');
+  assert.equal(harness.builtInPiiState.className, 'badge active');
+  assert.deepEqual(harness.builtInPiiRules.children.map((item) => item.tagName), ['LI', 'LI']);
+  assert.equal(harness.builtInPiiRules.children[1].textContent, '<script>not markup</script> - irreversible redaction');
+  assert.equal(harness.builtInPiiRules.children[1].children.length, 0);
+  harness.builtInPiiForm.elements.isActive.checked = false;
+  harness.builtInPiiForm.dispatchEvent(new Event('submit', { cancelable: true }));
+  await settle();
+  assert.equal(harness.builtInPiiState.textContent, 'Inactive');
+  assert.equal(harness.builtInPiiState.className, 'badge');
+  assert.deepEqual(
+    harness.requests.filter(({ route, options }) => route === '/admin/filters/built-in-pii' && options.method === 'PUT')
+      .map(({ options }) => JSON.parse(options.body)),
+    [{ is_active: true }, { is_active: false }],
+  );
+  assert.equal(harness.requests.filter(({ route, options }) => route === '/admin/filters/built-in-pii' && !options.method).length, 2);
+  assert.equal(harness.requests.some(({ route }) => route.startsWith('/admin/stats?')), false);
+});
+
 
 test('provider submit keeps its form after the async create request', async () => {
   const { providerForm, requests, status } = createDashboardHarness();
@@ -193,7 +246,7 @@ test('provider submit keeps its form after the async create request', async () =
   assert.equal(status.className, 'status success');
   assert.deepEqual(
     requests.filter(({ options }) => !options.method).map(({ route }) => route).sort(),
-    ['/admin/filters', '/admin/models', '/admin/onboarding', '/admin/provider-presets', '/admin/providers', '/admin/users'].sort(),
+    ['/admin/filters', '/admin/filters/built-in-pii', '/admin/models', '/admin/onboarding', '/admin/provider-presets', '/admin/providers', '/admin/users'].sort(),
   );
 });
 
@@ -206,7 +259,7 @@ test('provider submit reloads configuration without reloading statistics', async
   const reloadRoutes = requests.filter(({ options }) => !options.method).map(({ route }) => route);
   assert.deepEqual(
     reloadRoutes.filter((route) => !route.startsWith('/admin/stats?')).sort(),
-    ['/admin/filters', '/admin/models', '/admin/onboarding', '/admin/provider-presets', '/admin/providers', '/admin/users'].sort(),
+    ['/admin/filters', '/admin/filters/built-in-pii', '/admin/models', '/admin/onboarding', '/admin/provider-presets', '/admin/providers', '/admin/users'].sort(),
   );
   assert.equal(reloadRoutes.some((route) => route.startsWith('/admin/stats?')), false);
 });

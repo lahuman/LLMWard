@@ -91,6 +91,25 @@ function chat(token, model, maxTokens, stream = false) {
   });
 }
 
+function activateBuiltInPii(t) {
+  const existing = db.prepare(
+    "SELECT setting_value, updated_at FROM app_settings WHERE setting_key = 'built_in_pii_filter_active'"
+  ).get();
+  db.prepare(
+    "INSERT INTO app_settings (setting_key, setting_value, updated_at) VALUES ('built_in_pii_filter_active', '1', ?) " +
+    "ON CONFLICT(setting_key) DO UPDATE SET setting_value = '1', updated_at = excluded.updated_at"
+  ).run(new Date().toISOString());
+  t.after(() => {
+    if (existing) {
+      db.prepare(
+        "UPDATE app_settings SET setting_value = ?, updated_at = ? WHERE setting_key = 'built_in_pii_filter_active'"
+      ).run(existing.setting_value, existing.updated_at);
+    } else {
+      db.prepare("DELETE FROM app_settings WHERE setting_key = 'built_in_pii_filter_active'").run();
+    }
+  });
+}
+
 function unsafeProviderBaseUrls() {
   return [
     `${providerBaseUrl}?mode=unsafe`,
@@ -160,7 +179,7 @@ before(async () => {
       });
       res.writeHead(200, { 'Content-Type': 'text/event-stream' });
       providerEvents.emit('backpressure:started');
-      const chunk = `data: ${JSON.stringify({ choices: [{ delta: { content: 'x'.repeat(64 * 1024) } }] })}\n\n`;
+      const chunk = `data: ${JSON.stringify({ choices: [{ index: 0, delta: { content: 'x'.repeat(64 * 1024) } }] })}\n\n`;
       while (!res.destroyed && !res.writableEnded) {
         if (!res.write(chunk)) {
           await new Promise((resolve) => {
@@ -1035,26 +1054,33 @@ test('unexpected redirects are rejected without changing provider configuration'
   assert.equal(response.body.code, 'provider_redirect_rejected');
 });
 
-test('client disconnect aborts upstream and releases quota and concurrency', async () => {
+test('client disconnect aborts upstream and releases quota and concurrency', async (t) => {
   const user = await createUser('disconnect-user', ['disconnect']);
+  activateBuiltInPii(t);
+  const resident = '000229-3123456';
   const before = upstreamDisconnects;
   await new Promise((resolve) => {
     const client = http.request(`${baseUrl}/v1/chat/completions`, {
       method: 'POST', headers: { Authorization: `Bearer ${user.token}`, 'Content-Type': 'application/json' }
     });
     client.on('error', () => {});
-    client.write(JSON.stringify({ model: 'disconnect', messages: [{ role: 'user', content: 'disconnect-secret' }], max_tokens: 1 }));
+    client.write(JSON.stringify({ model: 'disconnect', messages: [{ role: 'user', content: resident }], max_tokens: 1 }));
     client.end();
     setTimeout(() => client.destroy(), 30);
     setTimeout(resolve, 250);
   });
-  assert.ok(upstreamDisconnects > before);
+  assert.equal(upstreamDisconnects, before + 1);
   assert.equal(db.prepare('SELECT COUNT(*) AS count FROM quota_reservations WHERE user_id = ?').get(user.id).count, 0);
   const { state } = require('../services/limits');
   assert.equal(state().users[user.id], undefined);
+  assert.equal(receivedPayloads.get('disconnect').messages[0].content.includes(resident), false);
+  assert.equal(state().models.disconnect, undefined);
+  assert.equal(state().providers[providerId], undefined);
 });
 
-test('streaming backpressure aborts upstream and releases quota and concurrency', async () => {
+test('streaming backpressure aborts upstream and releases quota and concurrency', async (t) => {
+  activateBuiltInPii(t);
+  const resident = '000229-3123456';
   const user = await createUser('backpressure-user', ['backpressure']);
   const before = upstreamDisconnects;
   const started = once(providerEvents, 'backpressure:started', { signal: AbortSignal.timeout(3000) });
@@ -1069,7 +1095,7 @@ test('streaming backpressure aborts upstream and releases quota and concurrency'
   });
   client.end(JSON.stringify({
     model: 'backpressure', stream: true,
-    messages: [{ role: 'user', content: 'backpressure-secret' }], max_tokens: 1
+    messages: [{ role: 'user', content: resident }], max_tokens: 1
   }));
 
   await started;
@@ -1080,6 +1106,7 @@ test('streaming backpressure aborts upstream and releases quota and concurrency'
   await waitFor(() => reservationCount() === 0, 'backpressure cleanup did not finish');
   const { state } = require('../services/limits');
   assert.equal(upstreamDisconnects, before + 1);
+  assert.equal(receivedPayloads.get('backpressure').messages[0].content.includes(resident), false);
   assert.equal(reservationCount(), 0);
   assert.equal(state().users[user.id], undefined);
   assert.equal(state().models.backpressure, undefined);
@@ -1087,6 +1114,8 @@ test('streaming backpressure aborts upstream and releases quota and concurrency'
 });
 
 test('abortInFlight aborts active requests and cleanup is idempotent', async (t) => {
+  activateBuiltInPii(t);
+  const resident = '000229-3123456';
   const user = await createUser('abort-in-flight-user', ['abort-in-flight']);
   const before = upstreamDisconnects;
   const started = once(providerEvents, 'abort-in-flight:started', { signal: AbortSignal.timeout(3000) });
@@ -1107,7 +1136,7 @@ test('abortInFlight aborts active requests and cleanup is idempotent', async (t)
   client.once('error', rejectResponse);
   const completed = once(client, 'close', { signal: AbortSignal.timeout(3000) });
   client.end(JSON.stringify({
-    model: 'abort-in-flight', messages: [{ role: 'user', content: 'abort-secret' }], max_tokens: 1
+    model: 'abort-in-flight', messages: [{ role: 'user', content: resident }], max_tokens: 1
   }));
   t.after(() => client.destroy());
 
@@ -1125,6 +1154,7 @@ test('abortInFlight aborts active requests and cleanup is idempotent', async (t)
   await waitFor(() => reservationCount() === 0, 'abortInFlight cleanup did not finish');
   const { state } = require('../services/limits');
   assert.equal(upstreamDisconnects, before + 1);
+  assert.equal(receivedPayloads.get('abort-in-flight').messages[0].content.includes(resident), false);
   assert.equal(reservationCount(), 0);
   assert.equal(state().users[user.id], undefined);
   assert.equal(state().models['abort-in-flight'], undefined);

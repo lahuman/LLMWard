@@ -113,3 +113,11 @@ npm run benchmark
 ## 라이선스
 
 [MIT License](LICENSE)로 배포됩니다.
+
+## Built-in Korean PII filter
+
+The global Built-in Korean PII & Secret Filter card is disabled by default.
+Administrators can only enable it; reviewed rules are edited in
+`services/pii-filter.js` together with tests. PII pseudonym mappings are
+request-local, while detected secrets return `[FILTERED]` and are never restored.
+The filter is not output DLP or a general DLP system.

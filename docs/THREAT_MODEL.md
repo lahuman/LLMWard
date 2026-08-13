@@ -24,3 +24,13 @@
 - 리터럴 content 필터는 범용 DLP가 아닙니다. 인코딩·변형된 값, tool/function arguments, 이미지·오디오와 기타 비대상 필드의 유출은 막지 못합니다.
 
 `filter_name` is response-only for `content_filtered` and is not persisted in request or application logs. Patterns and matched content remain undisclosed.
+
+## Built-in PII pseudonymization boundary
+
+For supported input, the provider sees placeholders only. Nonce collision
+prevention and exact-owned restoration prevent cross-request substitution; the
+request context dies in finally and is never persisted or logged. Raw secrets
+never enter restoration maps. Tool calls, attachments, and vendor fields remain
+disclosure paths. PII false positives restore, secret matches are irreversible
+`[FILTERED]` redactions. This is not a compliance guarantee, not output DLP, and
+not a general DLP system.

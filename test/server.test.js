@@ -58,7 +58,7 @@ test('SIGTERM aborts held requests and exits cleanly before the force limit', as
   const databasePath = path.join(temporaryDirectory, 'server.test.db');
   const adminKey = `admin-${crypto.randomBytes(32).toString('base64url')}`;
   const providerKey = `provider-${crypto.randomBytes(24).toString('base64url')}`;
-  const promptMarker = `prompt-${crypto.randomBytes(12).toString('hex')}`;
+  const resident = '000229-3123456';
   const providerEvents = new EventEmitter();
   let upstreamCloses = 0;
   let receivedProviderAuthorization;
@@ -168,13 +168,17 @@ test('SIGTERM aborts held requests and exits cleanly before the force limit', as
   });
   assert.equal(user.status, 201);
   const userToken = user.body.apiToken;
-  assert.equal(new Set([adminKey, providerKey, userToken, promptMarker]).size, 4);
+  const activation = await request(`${baseUrl}/admin/filters/built-in-pii`, {
+    method: 'PUT', headers: adminHeaders, body: { is_active: true }
+  });
+  assert.equal(activation.status, 200);
+  assert.equal(new Set([adminKey, providerKey, userToken, resident]).size, 4);
   const started = once(providerEvents, 'started', { signal: AbortSignal.timeout(3000) });
   const closed = once(providerEvents, 'closed', { signal: AbortSignal.timeout(3000) });
   const heldRequest = request(`${baseUrl}/v1/chat/completions`, {
     method: 'POST', headers: { Authorization: `Bearer ${userToken}` },
     body: {
-      model: 'shutdown-held', messages: [{ role: 'user', content: promptMarker }], max_tokens: 1
+      model: 'shutdown-held', messages: [{ role: 'user', content: resident }], max_tokens: 1
     }
   }).catch(() => null);
   await started;
@@ -190,7 +194,8 @@ test('SIGTERM aborts held requests and exits cleanly before the force limit', as
   assert.equal(exitCode, 0);
   assert.equal(upstreamCloses, 1);
   assert.equal(receivedProviderAuthorization, `Bearer ${providerKey}`);
-  assert.equal(receivedPromptMarker, promptMarker);
+  assert.notEqual(receivedPromptMarker, resident);
+  assert.match(receivedPromptMarker, /^\[\[LLMWARD:[0-9a-f]{32}:kr_resident_registration_number:\d{6}\]\]$/u);
   const migrated = new Database(databasePath, { readonly: true });
   assert.equal(migrated.prepare('SELECT COUNT(*) AS count FROM quota_reservations').get().count, 0);
   assert.deepEqual(migrated.prepare(
@@ -199,11 +204,17 @@ test('SIGTERM aborts held requests and exits cleanly before the force limit', as
     status: 'failure', error_type: 'internal'
   });
   migrated.close();
+  for (const file of [databasePath, databasePath + '-wal', databasePath + '-shm']) {
+    if (!fs.existsSync(file)) continue;
+    const bytes = fs.readFileSync(file);
+    assert.equal(bytes.includes(Buffer.from(resident)), false);
+    assert.equal(bytes.includes(Buffer.from(receivedPromptMarker)), false);
+  }
   const output = stdout + stderr;
   assert.equal(output.includes('LLM Gateway server started'), true);
   assert.equal(output.includes('Shutdown requested'), true);
   assert.equal(output.includes('"signal":"SIGTERM"'), true);
-  for (const secret of [adminKey, providerKey, userToken, promptMarker]) {
+  for (const secret of [adminKey, providerKey, userToken, resident, receivedPromptMarker]) {
     assert.equal(output.includes(secret), false);
   }
 });
