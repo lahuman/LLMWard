@@ -362,6 +362,10 @@ function createDashboardHarness({ storedKey = '', fetchOverride, confirmResult =
     modelDialogStatus: document.getElementById('model-dialog-status'),
     modelDiscovery: document.getElementById('model-discovery'),
     modelDiscoveryList: document.getElementById('model-discovery-list'),
+    providerSubmit: document.getElementById('provider-submit'),
+    providerDialogStatus: document.getElementById('provider-dialog-status'),
+    providerPresetField: document.getElementById('provider-preset-field'),
+    providerEnvField: document.getElementById('provider-env-field'),
     confirmForm: document.getElementById('confirm-form'),
     confirmSubmit: document.getElementById('confirm-submit'),
     confirmMessage: document.getElementById('confirm-message'),
@@ -538,33 +542,278 @@ test('built-in PII filter saves its active state and renders rules as safe list 
 });
 
 
-test('provider submit keeps its form after the async create request', async () => {
-  const { providerForm, requests, status } = createDashboardHarness();
-
-  providerForm.dispatchEvent(new Event('submit', { cancelable: true }));
+test('provider create presets populate the modal and successful submit reloads configuration only', async () => {
+  const mutation = deferred();
+  const preset = { id: 'openai-compatible', name: 'OpenAI compatible', base_url: 'https://api.example/v1' };
+  const harness = createDashboardHarness({
+    storedKey: 'stored-admin-key',
+    fetchOverride(route, options) {
+      if (route === '/admin/provider-presets') return response([preset]);
+      if (route === '/admin/providers' && options.method === 'POST') return mutation.promise;
+      return undefined;
+    },
+  });
   await settle();
-
-  assert.equal(providerForm.resetCount, 1);
-  assert.equal(status.textContent, 'Created successfully.');
-  assert.equal(status.className, 'status success');
-  assert.deepEqual(
-    requests.filter(({ options }) => !options.method).map(({ route }) => route).sort(),
-    ['/admin/filters', '/admin/filters/built-in-pii', '/admin/models', '/admin/onboarding', '/admin/provider-presets', '/admin/providers', '/admin/users'].sort(),
-  );
+  const requestStart = harness.requests.length;
+  harness.providerForm.elements.providerName.value = 'stale-provider';
+  harness.providerForm.elements.storedKey.value = 'stale-secret';
+  harness.createProvider.dispatchEvent(new Event('click'));
+  assert.equal(harness.providerDialog.open, true);
+  assert.equal(harness.providerForm.elements.providerId.value, '');
+  assert.equal(harness.providerForm.elements.providerName.value, '');
+  assert.equal(harness.providerForm.elements.storedKey.value, '');
+  assert.equal(harness.providerPresetField.classList.contains('hidden'), false);
+  assert.equal(harness.providerForm.elements.preset.disabled, false);
+  assert.equal(harness.providerEnvField.classList.contains('hidden'), false);
+  assert.equal(harness.providerForm.elements.envName.disabled, false);
+  harness.providerForm.elements.preset.value = preset.id;
+  harness.providerForm.elements.preset.dispatchEvent(new Event('change'));
+  assert.equal(harness.providerForm.elements.providerName.value, preset.id);
+  assert.equal(harness.providerForm.elements.displayName.value, preset.name);
+  assert.equal(harness.providerForm.elements.baseUrl.value, preset.base_url);
+  harness.providerForm.elements.authType.value = 'api_key';
+  harness.providerForm.elements.envName.value = 'PROVIDER_API_KEY';
+  harness.providerForm.elements.storedKey.value = 'created-secret';
+  harness.providerForm.dispatchEvent(new Event('submit', { cancelable: true }));
+  harness.providerForm.dispatchEvent(new Event('submit', { cancelable: true }));
+  await settle();
+  const posts = harness.requests.filter(({ route, options }) => route === '/admin/providers' && options.method === 'POST');
+  assert.equal(posts.length, 1);
+  assert.deepEqual(JSON.parse(posts[0].options.body), {
+    provider_name: 'openai-compatible', display_name: 'OpenAI compatible',
+    base_url: 'https://api.example/v1', auth_type: 'api_key',
+    api_key_env_name: 'PROVIDER_API_KEY', stored_api_key: 'created-secret',
+  });
+  assert.equal(harness.providerSubmit.disabled, true);
+  assert.equal(harness.providerCancel.disabled, true);
+  harness.providerCancel.dispatchEvent(new Event('click'));
+  harness.providerDialog.cancel();
+  harness.createProvider.dispatchEvent(new Event('click'));
+  assert.equal(harness.providerDialog.open, true);
+  assert.equal(harness.providerDialog.showModalCount, 1);
+  mutation.resolve(response(dashboardProvider()));
+  await settle();
+  assert.equal(harness.providerDialog.open, false);
+  assert.equal(harness.providerForm.elements.storedKey.value, '');
+  assert.equal(harness.status.textContent, 'Created successfully.');
+  assert.equal(harness.status.className, 'status success');
+  const reloadRoutes = harness.requests.slice(requestStart)
+    .filter(({ options }) => !options.method).map(({ route }) => route);
+  assert.deepEqual(reloadRoutes.sort(), [
+    '/admin/filters', '/admin/filters/built-in-pii', '/admin/models', '/admin/onboarding',
+    '/admin/provider-presets', '/admin/providers', '/admin/users',
+  ].sort());
+  assert.equal(reloadRoutes.some((route) => route.startsWith('/admin/stats?')), false);
+  assert.equal(harness.confirmCount, 0);
+  assert.equal(harness.promptCount, 0);
 });
 
-test('provider submit reloads configuration without reloading statistics', async () => {
-  const { providerForm, requests } = createDashboardHarness();
-
-  providerForm.dispatchEvent(new Event('submit', { cancelable: true }));
+test('provider edit never prefills or exposes credentials', async () => {
+  const provider = dashboardProvider({ hasApiKey: true, stored_api_key: 'must-not-be-visible', api_key_env_name: 'SECRET_ENV_NAME' });
+  const harness = createDashboardHarness({ storedKey: 'stored-admin-key', fetchOverride(route) {
+    if (route === '/admin/providers') return response([provider]);
+    return undefined;
+  }});
   await settle();
+  assert.equal(collectText(harness.providersContent).includes('Configured'), true);
+  assert.equal(collectText(harness.providersContent).includes('must-not-be-visible'), false);
+  assert.equal(collectText(harness.providersContent).includes('SECRET_ENV_NAME'), false);
+  findButton(harness.providersContent, 'Edit').dispatchEvent(new Event('click'));
+  assert.equal(harness.providerDialog.open, true);
+  assert.equal(harness.providerForm.elements.providerId.value, '7');
+  assert.equal(harness.providerForm.elements.providerName.value, 'provider-a');
+  assert.equal(harness.providerForm.elements.displayName.value, 'Provider A');
+  assert.equal(harness.providerForm.elements.baseUrl.value, 'https://provider.example/v1');
+  assert.equal(harness.providerForm.elements.authType.value, 'none');
+  assert.equal(harness.providerPresetField.classList.contains('hidden'), true);
+  assert.equal(harness.providerForm.elements.preset.disabled, true);
+  assert.equal(harness.providerEnvField.classList.contains('hidden'), true);
+  assert.equal(harness.providerForm.elements.envName.disabled, true);
+  assert.equal(harness.providerForm.elements.envName.value, '');
+  assert.equal(harness.providerForm.elements.storedKey.value, '');
+  assert.equal(harness.providerForm.elements.removeStoredKey.checked, false);
+  assert.equal(harness.providerForm.elements.providerName.focusCount, 1);
+  assert.equal(harness.promptCount, 0);
+});
 
-  const reloadRoutes = requests.filter(({ options }) => !options.method).map(({ route }) => route);
-  assert.deepEqual(
-    reloadRoutes.filter((route) => !route.startsWith('/admin/stats?')).sort(),
-    ['/admin/filters', '/admin/filters/built-in-pii', '/admin/models', '/admin/onboarding', '/admin/provider-presets', '/admin/providers', '/admin/users'].sort(),
-  );
-  assert.equal(reloadRoutes.some((route) => route.startsWith('/admin/stats?')), false);
+test('provider edit distinguishes unchanged replacement and explicit credential removal', async () => {
+  async function submitCredential(configure) {
+    const provider = dashboardProvider({ hasApiKey: true });
+    const harness = createDashboardHarness({ storedKey: 'stored-admin-key', fetchOverride(route, options) {
+      if (route === '/admin/providers') return response([provider]);
+      if (route === '/admin/providers/7' && options.method === 'PUT') return response(provider);
+      return undefined;
+    }});
+    await settle();
+    findButton(harness.providersContent, 'Edit').dispatchEvent(new Event('click'));
+    configure(harness);
+    harness.providerForm.dispatchEvent(new Event('submit', { cancelable: true }));
+    await settle();
+    const updates = harness.requests.filter(({ route, options }) => route === '/admin/providers/7' && options.method === 'PUT');
+    assert.equal(updates.length, 1);
+    assert.equal(harness.providerDialog.open, false);
+    assert.equal(harness.providerForm.elements.storedKey.value, '');
+    assert.equal(harness.confirmCount, 0);
+    assert.equal(harness.promptCount, 0);
+    return JSON.parse(updates[0].options.body);
+  }
+  const unchangedBody = await submitCredential(() => {});
+  const replacementBody = await submitCredential((harness) => {
+    harness.providerForm.elements.storedKey.value = 'new-secret';
+  });
+  const removalBody = await submitCredential((harness) => {
+    harness.providerForm.elements.removeStoredKey.checked = true;
+    harness.providerForm.elements.removeStoredKey.dispatchEvent(new Event('change'));
+  });
+  assert.equal(Object.hasOwn(unchangedBody, 'stored_api_key'), false);
+  assert.equal(replacementBody.stored_api_key, 'new-secret');
+  assert.equal(removalBody.stored_api_key, null);
+  for (const body of [unchangedBody, replacementBody, removalBody]) {
+    assert.equal(Object.hasOwn(body, 'api_key_env_name'), false);
+  }
+});
+
+test('provider credential controls are mutually exclusive and clear on close', async () => {
+  const harness = createDashboardHarness({ storedKey: 'stored-admin-key', fetchOverride(route) {
+    if (route === '/admin/providers') return response([dashboardProvider({ hasApiKey: true })]);
+    return undefined;
+  }});
+  await settle();
+  const edit = findButton(harness.providersContent, 'Edit');
+  edit.dispatchEvent(new Event('click'));
+  const password = harness.providerForm.elements.storedKey;
+  const remove = harness.providerForm.elements.removeStoredKey;
+  password.value = 'replacement-to-clear';
+  remove.checked = true;
+  remove.dispatchEvent(new Event('change'));
+  assert.equal(password.value, '');
+  assert.equal(password.disabled, true);
+  remove.checked = false;
+  remove.dispatchEvent(new Event('change'));
+  assert.equal(password.disabled, false);
+  remove.checked = true;
+  password.value = 'replacement-wins';
+  password.dispatchEvent(new Event('input'));
+  assert.equal(remove.checked, false);
+  assert.equal(password.disabled, false);
+  harness.providerCancel.dispatchEvent(new Event('click'));
+  assert.equal(harness.providerDialog.open, false);
+  assert.equal(password.value, '');
+  assert.equal(password.disabled, false);
+  assert.equal(remove.checked, false);
+  assert.equal(harness.createProvider.focusCount, 0);
+  assert.equal(edit.focusCount, 1);
+});
+
+test('provider mutation errors stay local and preserve the replacement credential', async () => {
+  const mutation = deferred();
+  const error = '<script>Provider validation failed</script>';
+  const harness = createDashboardHarness({ storedKey: 'stored-admin-key', fetchOverride(route, options) {
+    if (route === '/admin/providers') return response([dashboardProvider({ hasApiKey: true })]);
+    if (route === '/admin/providers/7' && options.method === 'PUT') return mutation.promise;
+    return undefined;
+  }});
+  await settle();
+  const edit = findButton(harness.providersContent, 'Edit');
+  edit.dispatchEvent(new Event('click'));
+  harness.providerForm.elements.storedKey.value = 'retry-this-secret';
+  harness.providerForm.dispatchEvent(new Event('submit', { cancelable: true }));
+  harness.providerForm.dispatchEvent(new Event('submit', { cancelable: true }));
+  await settle();
+  assert.equal(harness.requests.filter(({ route, options }) => route === '/admin/providers/7' && options.method === 'PUT').length, 1);
+  assert.equal(harness.providerSubmit.disabled, true);
+  assert.equal(harness.providerCancel.disabled, true);
+  harness.providerCancel.dispatchEvent(new Event('click'));
+  harness.providerDialog.cancel();
+  edit.dispatchEvent(new Event('click'));
+  assert.equal(harness.providerDialog.open, true);
+  assert.equal(harness.providerDialog.showModalCount, 1);
+  mutation.resolve({ ok: false, status: 400, json: async () => ({ error }) });
+  await settle();
+  assert.equal(harness.providerDialog.open, true);
+  assert.equal(harness.providerForm.elements.storedKey.value, 'retry-this-secret');
+  assert.equal(harness.providerSubmit.disabled, false);
+  assert.equal(harness.providerCancel.disabled, false);
+  assert.equal(harness.providerDialogStatus.textContent, error);
+  assert.equal(harness.providerDialogStatus.children.length, 0);
+  assert.equal(harness.status.textContent.includes(error), false);
+  harness.providerCancel.dispatchEvent(new Event('click'));
+  assert.equal(harness.providerForm.elements.storedKey.value, '');
+  assert.equal(edit.focusCount, 1);
+});
+
+test('provider deactivation and hard deletion use named confirmation', async () => {
+  const active = dashboardProvider({ id: 61, provider_name: 'active-provider' });
+  const inactive = dashboardProvider({ id: 62, provider_name: 'inactive-provider', is_active: false });
+  let deleted = false;
+  const harness = createDashboardHarness({ storedKey: 'stored-admin-key', fetchOverride(route, options) {
+    if (route === '/admin/providers' && !options.method) return response(deleted ? [inactive] : [active, inactive]);
+    if (route === '/admin/providers/61' && options.method === 'PUT') return response({ ...active, is_active: false });
+    if (route === '/admin/providers/62' && options.method === 'PUT') return response({ ...inactive, is_active: true });
+    if (route === '/admin/providers/61' && options.method === 'DELETE') {
+      deleted = true;
+      return response({});
+    }
+    return undefined;
+  }});
+  await settle();
+  findButton(harness.providersContent, 'Deactivate').dispatchEvent(new Event('click'));
+  assert.equal(harness.confirmDialog.open, true);
+  assert.match(harness.confirmMessage.textContent, /active-provider/u);
+  harness.confirmForm.dispatchEvent(new Event('submit', { cancelable: true }));
+  harness.confirmForm.dispatchEvent(new Event('submit', { cancelable: true }));
+  await settle();
+  const deactivations = harness.requests.filter(({ route, options }) => route === '/admin/providers/61' && options.method === 'PUT');
+  assert.equal(deactivations.length, 1);
+  assert.deepEqual(JSON.parse(deactivations[0].options.body), { is_active: false });
+  const confirmOpenCount = harness.confirmDialog.showModalCount;
+  findButton(harness.providersContent, 'Activate').dispatchEvent(new Event('click'));
+  await settle();
+  const activations = harness.requests.filter(({ route, options }) => route === '/admin/providers/62' && options.method === 'PUT');
+  assert.deepEqual(activations.map(({ options }) => JSON.parse(options.body)), [{ is_active: true }]);
+  assert.equal(harness.confirmDialog.showModalCount, confirmOpenCount);
+  findButton(harness.providersContent, 'Delete').dispatchEvent(new Event('click'));
+  assert.equal(harness.confirmDialog.open, true);
+  assert.match(harness.confirmMessage.textContent, /active-provider/u);
+  harness.confirmForm.dispatchEvent(new Event('submit', { cancelable: true }));
+  await settle();
+  assert.equal(harness.requests.filter(({ route, options }) => route === '/admin/providers/61' && options.method === 'DELETE').length, 1);
+  assert.equal(harness.createProvider.focusCount, 1);
+  assert.equal(harness.confirmCount, 0);
+  assert.equal(harness.promptCount, 0);
+});
+
+test('provider delete guards keep the confirmation open with the server error', async () => {
+  const provider = dashboardProvider({ id: 71, provider_name: 'attached-<provider>' });
+  const error = '<script>Cannot delete a provider with attached models</script>';
+  const harness = createDashboardHarness({ storedKey: 'stored-admin-key', fetchOverride(route, options) {
+    if (route === '/admin/providers') return response([provider]);
+    if (route === '/admin/providers/71' && options.method === 'DELETE') {
+      return { ok: false, status: 400, json: async () => ({ error }) };
+    }
+    return undefined;
+  }});
+  await settle();
+  const originalTable = harness.providersContent.children[0];
+  findButton(harness.providersContent, 'Delete').dispatchEvent(new Event('click'));
+  harness.confirmForm.dispatchEvent(new Event('submit', { cancelable: true }));
+  harness.confirmForm.dispatchEvent(new Event('submit', { cancelable: true }));
+  await settle();
+  assert.equal(harness.requests.filter(({ route, options }) => route === '/admin/providers/71' && options.method === 'DELETE').length, 1);
+  assert.equal(harness.confirmDialog.open, true);
+  assert.equal(harness.confirmSubmit.disabled, false);
+  assert.equal(harness.confirmDialogStatus.textContent, error);
+  assert.equal(harness.confirmDialogStatus.children.length, 0);
+  assert.equal(harness.providersContent.children[0], originalTable);
+  assert.equal(harness.requests.some(({ route }) => route.startsWith('/admin/models/')), false);
+  assert.equal(harness.confirmCount, 0);
+  assert.equal(harness.promptCount, 0);
+});
+
+test('resource management functions contain no browser prompts or confirms', () => {
+  const script = fs.readFileSync(path.join(__dirname, '..', 'public', 'admin-dashboard.js'), 'utf8');
+  const resourceFunctions = script.slice(script.indexOf('function renderUsers'), script.indexOf('function filterScope'));
+  assert.doesNotMatch(resourceFunctions, /window\.(?:prompt|confirm)\s*\(/u);
 });
 
 test('explicit login starts configuration and statistics together', async () => {
