@@ -85,8 +85,8 @@
         <input name="userId" type="hidden">
         <div class="grid">
           <label>Username <input name="username" required maxlength="200"></label>
-          <label>Daily input quota (0 = unlimited) <input name="inputQuota" type="number" min="0" step="1" value="0" required></label>
-          <label>Daily output quota (0 = unlimited) <input name="outputQuota" type="number" min="0" step="1" value="0" required></label>
+          <label>Daily input quota (0 = unlimited) <input name="inputQuota" type="number" min="0" max="9007199254740991" step="1" value="0" required></label>
+          <label>Daily output quota (0 = unlimited) <input name="outputQuota" type="number" min="0" max="9007199254740991" step="1" value="0" required></label>
           <label>Allowed models (comma-separated; blank means all) <input name="allowedModels"></label>
         </div>
         <div id="user-dialog-status" class="status hidden" role="status" aria-live="polite"></div>
@@ -108,7 +108,7 @@
           <label>Identifier <input name="modelName" required></label>
           <label>Display name <input name="displayName" required></label>
           <label>Provider <select name="providerId" required></select></label>
-          <label>Maximum output tokens <input name="maxTokens" type="number" min="1" step="1" value="4096" required></label>
+          <label>Maximum output tokens <input name="maxTokens" type="number" min="1" max="9007199254740991" step="1" value="4096" required></label>
           <label>Context window (tokens) <input name="contextWindow" type="number" min="1" max="9007199254740991" step="1" placeholder="Not configured" aria-describedby="context-window-help"></label>
           <label>Input USD / 1M tokens <input name="inputPrice" type="number" min="0" step="any" placeholder="Not configured"></label>
           <label>Output USD / 1M tokens <input name="outputPrice" type="number" min="0" step="any" placeholder="Not configured"></label>

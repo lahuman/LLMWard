@@ -171,7 +171,7 @@ function deferred() {
   return { promise, resolve };
 }
 
-function createDashboardHarness({ storedKey = '', fetchOverride } = {}) {
+function createDashboardHarness({ storedKey = '', fetchOverride, confirmResult = false } = {}) {
   const elements = new Map();
   const register = (id, item = new FakeNode()) => {
     elements.set(id, item);
@@ -315,7 +315,7 @@ function createDashboardHarness({ storedKey = '', fetchOverride } = {}) {
     window: new FakeNode(),
   };
   context.window.prompt = () => { throw new Error('Resource flows must not call window.prompt'); };
-  context.window.confirm = () => { confirmCount += 1; return false; };
+  context.window.confirm = () => { confirmCount += 1; return confirmResult; };
   context.window.addEventListener = () => {};
   vm.runInNewContext(fs.readFileSync(path.join(__dirname, '..', 'public', 'admin-dashboard.js'), 'utf8'), context);
   return {
@@ -342,6 +342,9 @@ function createDashboardHarness({ storedKey = '', fetchOverride } = {}) {
     userCancel: document.getElementById('user-cancel'),
     modelCancel: document.getElementById('model-cancel'),
     providerCancel: document.getElementById('provider-cancel'),
+    userTokenResult: document.getElementById('user-token-result'),
+    userTokenValue: document.getElementById('user-token-value'),
+    userTokenClose: document.getElementById('user-token-close'),
     clipboardWrites,
     get confirmCount() { return confirmCount; },
     window: context.window,
@@ -380,6 +383,18 @@ test('dashboard exposes labelled native resource and confirmation dialogs', () =
   }
   assert.match(html, /<dialog id="confirm-dialog"[^>]*aria-labelledby="confirm-title"[^>]*aria-describedby="confirm-message"/);
   assert.match(html, /id="confirm-dialog-status"[^>]*role="status"[^>]*aria-live="polite"/);
+  for (const name of ['inputQuota', 'outputQuota', 'maxTokens']) {
+    assert.match(html, new RegExp(`<input name="${name}"[^>]*max="9007199254740991"`));
+  }
+  assert.match(html, /<input name="contextWindow"[^>]*min="1"[^>]*max="9007199254740991"[^>]*step="1"[^>]*aria-describedby="context-window-help"/);
+  assert.match(html, /<input name="defaultTemperature"[^>]*min="0"[^>]*max="2"[^>]*aria-describedby="model-defaults-help"/);
+  assert.match(html, /<input name="defaultTopP"[^>]*min="0"[^>]*max="1"[^>]*aria-describedby="model-defaults-help"/);
+  assert.match(html, /<input name="defaultPresencePenalty"[^>]*min="-2"[^>]*max="2"[^>]*aria-describedby="model-defaults-help"/);
+  assert.match(html, /<input name="defaultFrequencyPenalty"[^>]*min="-2"[^>]*max="2"[^>]*aria-describedby="model-defaults-help"/);
+  assert.match(html, /<input name="defaultSeed"[^>]*min="-9007199254740991"[^>]*max="9007199254740991"[^>]*step="1"[^>]*aria-describedby="model-defaults-help"/);
+  assert.match(html, /id="context-window-help"[^>]*>[^<]*does not reconfigure the provider/);
+  assert.match(html, /id="model-defaults-help"[^>]*>[^<]*Client-owned fields always win/);
+  assert.match(html, /<details id="model-advanced">/);
   for (const resource of ['user', 'model', 'provider']) {
     const section = html.match(new RegExp(`<section id="tab-${resource}s"[\\s\\S]*?(?=<section id="tab-|<\/div>\\s*<\/main>)`));
     assert.ok(section);
@@ -429,6 +444,51 @@ test('backdrop clicks do not discard resource forms', () => {
   assert.equal(harness.providerDialog.open, true);
   assert.equal(harness.providerForm.elements.baseUrl.value, 'https://provider.example/v1');
   assert.equal(harness.confirmCount, 0);
+});
+
+test('successful legacy token rotation opens a clearable one-time token result', async () => {
+  const user = {
+    id: 7,
+    username: 'rotation-user',
+    is_active: true,
+    max_daily_input_tokens: 0,
+    max_daily_output_tokens: 0,
+    permissions_valid: true,
+    allowed_models: [],
+    created_at: '2026-08-13T00:00:00.000Z',
+  };
+  const token = 'rotated-<token>';
+  const harness = createDashboardHarness({
+    storedKey: 'stored-admin-key',
+    confirmResult: true,
+    fetchOverride(route, options) {
+      if (route === '/admin/users') return response([user]);
+      if (route === '/admin/users/7/rotate-token' && options.method === 'POST') {
+        return response({ apiToken: token });
+      }
+      return undefined;
+    },
+  });
+  await settle();
+  const rotate = findButton(harness.usersContent, 'Rotate token');
+  assert.ok(rotate);
+
+  rotate.dispatchEvent(new Event('click'));
+  await settle();
+
+  assert.equal(harness.confirmCount, 1);
+  assert.equal(harness.requests.filter(({ route }) => route === '/admin/users/7/rotate-token').length, 1);
+  assert.equal(harness.userDialog.open, true);
+  assert.equal(harness.userForm.classList.contains('hidden'), true);
+  assert.equal(harness.userTokenResult.classList.contains('hidden'), false);
+  assert.equal(harness.userTokenValue.textContent, token);
+  assert.equal(harness.userTokenValue.children.length, 0);
+  assert.equal(harness.status.textContent.includes(token), false);
+  harness.userTokenClose.dispatchEvent(new Event('click'));
+  assert.equal(harness.userDialog.open, false);
+  assert.equal(harness.userTokenValue.textContent, '');
+  assert.equal(harness.userTokenResult.classList.contains('hidden'), true);
+  assert.equal(rotate.focusCount, 1);
 });
 
 test('built-in PII filter saves its active state and renders rules as safe list items', async () => {
