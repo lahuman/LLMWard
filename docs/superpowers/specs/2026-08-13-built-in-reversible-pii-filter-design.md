@@ -125,9 +125,9 @@ Placeholders use a fixed ASCII form containing the nonce, rule ID, and counter. 
 
 Repeated PII within one request reuses its placeholder so the upstream model retains local referential consistency. Different requests always use different nonces. Secret occurrences do not store a reverse mapping to the raw secret.
 
-The context is limited to 200 unique restorable PII values and 64 KiB of total UTF-8 PII source bytes. Exceeding either bound returns HTTP 413 with the existing safe `request_too_large` classification before provider dispatch. The transformed serialized request must also remain within the existing 1 MiB limit.
+The context is limited to 200 unique restorable PII values and 64 KiB of total UTF-8 PII source bytes, counting every accepted occurrence including repeated values that reuse a placeholder. Exceeding either bound returns HTTP 413 with the existing safe `request_too_large` classification before provider dispatch. The transformed serialized request must also remain within the existing 1 MiB limit.
 
-The context remains a handler-local value. It is never attached to `req`, a snapshot, an error, a cache, or a global object. The existing single `finally` cleanup path clears its maps and set on success, provider error, processing error, timeout, client disconnect, backpressure failure, or server shutdown. PII values, placeholders, matches, and provider content are never written to SQLite, application logs, audit logs, or error bodies.
+The context remains a handler-local value. It is never attached to `req`, a snapshot, an error, a cache, or a global object. If input processing fails before a context can be returned, the service error boundary clears the partial context before throwing. After a context is returned, the existing single `finally` cleanup path clears it on success, provider error, output-processing error, timeout, client disconnect, backpressure failure, or server shutdown. PII values, placeholders, matches, and provider content are never written to SQLite, application logs, audit logs, or error bodies.
 
 ## Response processing
 
