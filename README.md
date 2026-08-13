@@ -36,6 +36,8 @@ curl http://localhost:3000/v1/chat/completions \
   -d '{"model":"your-model","messages":[{"role":"user","content":"hello"}]}'
 ```
 
+Chat Completions는 상태를 저장하지 않습니다. LLMWard는 요청에 포함된 `messages`만 공급자에 전달하며 대화 기록을 보관하거나 재구성하지 않습니다. OpenWebUI 같은 클라이언트가 연결을 다시 맺을 때도 이전 대화를 이어가려면 전체 대화의 `messages`를 다시 보내야 합니다.
+
 진단과 백업:
 
 ```powershell
@@ -89,6 +91,8 @@ reverse proxy의 read/idle timeout은 `LLMWARD_STREAM_IDLE_TIMEOUT_MS`보다 길
 ## 공급자와 모델
 
 Generic OpenAI-compatible, Ollama, vLLM, LM Studio, llama.cpp server, LocalAI, NVIDIA NIM 프리셋을 제공합니다. 프리셋은 URL과 설명일 뿐 별도 SDK가 아닙니다. `/models` 검색 결과는 DB를 변경하지 않으며 관리자가 확인한 모델 하나만 명시적으로 등록됩니다.
+
+모델의 `Maximum output tokens`는 한 응답에 허용하는 최대 출력 토큰 수이며 전체 컨텍스트 크기가 아닙니다. `context_window`는 공급자에서 실제로 설정한 모델 컨텍스트 크기를 기록하는 정보성 메타데이터일 뿐, LLMWard가 공급자의 컨텍스트 설정을 변경하지 않습니다. Ollama `num_ctx`, vLLM `max_model_len`, llama.cpp `n_ctx` 같은 공급자별 실행 설정은 운영자가 해당 공급자에서 직접 관리해야 합니다.
 
 ## 보존, 통계, 비용
 
