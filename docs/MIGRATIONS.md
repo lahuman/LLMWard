@@ -6,9 +6,11 @@ Before SQLite opens an existing target, startup validates its file type and head
 
 A missing database path or existing zero-length regular database file is treated as new only when `-wal`, `-shm`, and `-journal` entries are all absent. Startup checks the path and sidecars again immediately before opening it. Any orphaned sidecar, nonregular file, stat error, corrupt nonempty header, or future schema fails closed without creating or deleting database files.
 
-All schema changes, legacy-token migration, index creation, and the schema-version update run together in a `BEGIN IMMEDIATE` transaction. Re-running migration converges on schema version 3 without adding duplicate token records or indexes.
+All schema changes, legacy-token migration, index creation, and the schema-version update run together in a `BEGIN IMMEDIATE` transaction. Re-running migration converges on schema version 4 without adding duplicate token records or indexes.
 
 Schema version 3 adds `content_filters`, `content_filter_models`, their cascading foreign keys, and the model lookup index. Upgrading version 2 creates no filter rows, so existing traffic is unchanged. New filters are inactive, non-global, and have no model assignments unless an administrator explicitly changes them.
+
+Schema version 4 adds nullable `context_window`, `default_temperature`, `default_top_p`, `default_presence_penalty`, `default_frequency_penalty`, and `default_seed` columns to each model. Existing model rows and relationships are preserved without inferring values for the new columns.
 
 Legacy plaintext tokens are moved to `user_tokens`, then replaced in `users.api_token` by a `sha256:<hash>` marker while `secure_delete` is enabled. A marker is accepted only when its matching user token record exists; an orphaned marker aborts the migration and rolls back. Plaintext tokens are never retained in the database or WAL after a successful migration.
 

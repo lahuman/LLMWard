@@ -21,6 +21,8 @@ const REQUIRED_COLUMNS = {
   models: [
     'id', 'model_name', 'display_name', 'model_type', 'provider_id', 'is_active',
     'max_tokens', 'input_cost_per_million', 'output_cost_per_million', 'model_config',
+    'context_window', 'default_temperature', 'default_top_p', 'default_presence_penalty',
+    'default_frequency_penalty', 'default_seed',
     'created_at', 'max_concurrent_requests'
   ],
   usage_logs: ['id', 'user_id', 'request_date', 'input_tokens', 'output_tokens', 'total_tokens'],
@@ -155,6 +157,12 @@ function runMigrations() {
         max_tokens INTEGER NOT NULL DEFAULT 4096,
         input_cost_per_million REAL,
         output_cost_per_million REAL,
+        context_window INTEGER,
+        default_temperature REAL,
+        default_top_p REAL,
+        default_presence_penalty REAL,
+        default_frequency_penalty REAL,
+        default_seed INTEGER,
         model_config TEXT,
         created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
         FOREIGN KEY(provider_id) REFERENCES providers(id)
@@ -269,7 +277,13 @@ function runMigrations() {
       addMissingColumns('models', {
         input_cost_per_million: 'REAL',
         output_cost_per_million: 'REAL',
-        max_concurrent_requests: 'INTEGER NOT NULL DEFAULT 4'
+        max_concurrent_requests: 'INTEGER NOT NULL DEFAULT 4',
+        context_window: 'INTEGER',
+        default_temperature: 'REAL',
+        default_top_p: 'REAL',
+        default_presence_penalty: 'REAL',
+        default_frequency_penalty: 'REAL',
+        default_seed: 'INTEGER'
       });
       addMissingColumns('request_logs', {
         error_type: 'TEXT',

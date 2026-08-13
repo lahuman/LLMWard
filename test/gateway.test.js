@@ -856,6 +856,12 @@ test('database integrity remains valid', () => {
   const logColumns = new Set(db.prepare('PRAGMA table_info(request_logs)').all().map((column) => column.name));
   assert.ok(modelColumns.has('input_cost_per_million'));
   assert.ok(modelColumns.has('output_cost_per_million'));
+  assert.ok(modelColumns.has('context_window'));
+  assert.ok(modelColumns.has('default_temperature'));
+  assert.ok(modelColumns.has('default_top_p'));
+  assert.ok(modelColumns.has('default_presence_penalty'));
+  assert.ok(modelColumns.has('default_frequency_penalty'));
+  assert.ok(modelColumns.has('default_seed'));
   assert.ok(logColumns.has('response_time_ms'));
   assert.ok(logColumns.has('error_type'));
   assert.ok(logColumns.has('estimated_cost_usd'));
@@ -1270,7 +1276,7 @@ test('online backup, retention, audit privacy, doctor, and Docker healthcheck ar
   const backupPath = path.join(path.dirname(databasePath), 'backups', backup.body.filename);
   const copy = new Database(backupPath, { readonly: true });
   assert.equal(copy.pragma('integrity_check')[0].integrity_check, 'ok');
-  assert.equal(copy.pragma('user_version', { simple: true }), 3);
+  assert.equal(copy.pragma('user_version', { simple: true }), 4);
   copy.close();
 
   const user = await createUser('retention-user', ['standard']);

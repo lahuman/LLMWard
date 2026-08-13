@@ -69,17 +69,17 @@ function createDirtyFutureWal(file) {
     const database = new Database(process.env.DATABASE_PATH);
     if (database.pragma('journal_mode = WAL', { simple: true }) !== 'wal') process.exit(2);
     database.pragma('wal_autocheckpoint = 0');
-    database.exec("CREATE TABLE sentinel (id INTEGER PRIMARY KEY, value TEXT NOT NULL); INSERT INTO sentinel VALUES (1, 'keep'); PRAGMA user_version = 3;");
+    database.exec("CREATE TABLE sentinel (id INTEGER PRIMARY KEY, value TEXT NOT NULL); INSERT INTO sentinel VALUES (1, 'keep'); PRAGMA user_version = 4;");
     if (database.pragma('wal_checkpoint(TRUNCATE)')[0].busy !== 0) process.exit(3);
-    database.exec("UPDATE sentinel SET value = 'future' WHERE id = 1; PRAGMA user_version = 4;");
-    if (database.pragma('user_version', { simple: true }) !== 4) process.exit(4);
+    database.exec("UPDATE sentinel SET value = 'future' WHERE id = 1; PRAGMA user_version = 5;");
+    if (database.pragma('user_version', { simple: true }) !== 5) process.exit(4);
     process.exit(0);
   `;
   const result = spawnSync(process.execPath, ['-e', script], {
     cwd: root, encoding: 'utf8', env: { ...process.env, DATABASE_PATH: file }
   });
   assert.equal(result.status, 0, result.stdout + result.stderr);
-  assert.equal(fs.readFileSync(file).readUInt32BE(60) <= 3, true);
+  assert.equal(fs.readFileSync(file).readUInt32BE(60) <= 4, true);
   assert.equal(fs.statSync(`${file}-wal`).size > 0, true);
   assert.equal(fs.existsSync(`${file}-shm`), true);
 }
@@ -91,11 +91,31 @@ after(() => {
   fs.rmSync(temporaryDirectory, { recursive: true, force: true });
 });
 
-test('empty database migrates to schema 3', () => {
-  const file = databasePath('empty');
+test('empty database migrates to schema 4 with nullable model defaults', () => {
+  const file = databasePath('empty-v4');
   assertMigrated(migrate(file));
   const database = open(file, { readonly: true });
-  assert.equal(database.pragma('user_version', { simple: true }), 3);
+  assert.equal(database.pragma('user_version', { simple: true }), 4);
+  const columns = new Map(database.prepare('PRAGMA table_info(models)').all()
+    .map((column) => [column.name, column]));
+  assert.deepEqual(
+    ['context_window', 'default_temperature', 'default_top_p',
+      'default_presence_penalty', 'default_frequency_penalty', 'default_seed']
+      .map((name) => ({
+        name,
+        type: columns.get(name).type,
+        notnull: columns.get(name).notnull,
+        defaultValue: columns.get(name).dflt_value
+      })),
+    [
+      { name: 'context_window', type: 'INTEGER', notnull: 0, defaultValue: null },
+      { name: 'default_temperature', type: 'REAL', notnull: 0, defaultValue: null },
+      { name: 'default_top_p', type: 'REAL', notnull: 0, defaultValue: null },
+      { name: 'default_presence_penalty', type: 'REAL', notnull: 0, defaultValue: null },
+      { name: 'default_frequency_penalty', type: 'REAL', notnull: 0, defaultValue: null },
+      { name: 'default_seed', type: 'INTEGER', notnull: 0, defaultValue: null }
+    ]
+  );
   assert.deepEqual(database.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name").pluck().all(), [
     'app_settings', 'audit_logs', 'backup_history', 'content_filter_models', 'content_filters', 'models', 'providers', 'quota_reservations',
     'request_logs', 'usage_logs', 'user_tokens', 'users'
@@ -110,7 +130,7 @@ test('empty database migrates to schema 3', () => {
   database.close();
 });
 
-test('existing zero-length database initializes to schema 3 without sidecars', () => {
+test('existing zero-length database initializes to schema 4 without sidecars', () => {
   const file = databasePath('zero-length');
   fs.closeSync(fs.openSync(file, 'wx', 0o600));
   assert.equal(fs.statSync(file).size, 0);
@@ -119,7 +139,7 @@ test('existing zero-length database initializes to schema 3 without sidecars', (
   assertMigrated(migrate(file));
 
   const database = open(file, { readonly: true });
-  assert.equal(database.pragma('user_version', { simple: true }), 3);
+  assert.equal(database.pragma('user_version', { simple: true }), 4);
   assert.equal(database.pragma('integrity_check')[0].integrity_check, 'ok');
   assert.deepEqual(database.pragma('foreign_key_check'), []);
   database.close();
@@ -200,13 +220,13 @@ test('legacy and partial schemas migrate without data loss', () => {
   assert.equal(token.token_hash, '0ea8942f0663169dd69497241ac0e44b59dfae0233d8e22fd2a6c6c9b93dd45b');
   assert.equal(token.token_prefix, 'legacy-t');
   assert.equal(token.created_at, '2025-01-02T03:04:05.000Z');
-  assert.equal(database.pragma('user_version', { simple: true }), 3);
+  assert.equal(database.pragma('user_version', { simple: true }), 4);
   assert.equal(database.prepare("SELECT COUNT(*) AS count FROM sqlite_master WHERE type = 'table' AND name = 'content_filters'").get().count, 1);
   assert.equal(database.prepare("SELECT COUNT(*) AS count FROM sqlite_master WHERE type = 'table' AND name = 'content_filter_models'").get().count, 1);
   database.close();
 });
 
-test('version 2 schema upgrades to version 3 without losing model data', () => {
+test('version 2 schema upgrades to version 4 without losing model data', () => {
   const file = databasePath('version-two');
   assertMigrated(migrate(file));
   const versionTwo = open(file);
@@ -223,7 +243,7 @@ test('version 2 schema upgrades to version 3 without losing model data', () => {
 
   assertMigrated(migrate(file));
   const database = open(file, { readonly: true });
-  assert.equal(database.pragma('user_version', { simple: true }), 3);
+  assert.equal(database.pragma('user_version', { simple: true }), 4);
   assert.deepEqual(database.prepare(`
     SELECT model_name, display_name FROM models WHERE model_name = 'v2-model'
   `).get(), { model_name: 'v2-model', display_name: 'Version two model' });
@@ -233,6 +253,70 @@ test('version 2 schema upgrades to version 3 without losing model data', () => {
     ORDER BY name
   `).pluck().all(), ['content_filter_models', 'content_filters']);
   database.close();
+});
+
+test('version 3 schema upgrades to version 4 preserving model and related data', () => {
+  const file = databasePath('version-three');
+  assertMigrated(migrate(file));
+  const versionThree = open(file);
+  const defaultColumns = [
+    'context_window', 'default_temperature', 'default_top_p',
+    'default_presence_penalty', 'default_frequency_penalty', 'default_seed'
+  ];
+  const existingColumns = new Set(versionThree.prepare('PRAGMA table_info(models)').all()
+    .map((column) => column.name));
+  for (const column of defaultColumns) {
+    if (existingColumns.has(column)) versionThree.exec(`ALTER TABLE models DROP COLUMN ${column}`);
+  }
+  const providerId = Number(versionThree.prepare(`
+    INSERT INTO providers (provider_name, display_name, base_url)
+    VALUES ('v3-preserved-provider', 'V3 preserved provider', 'http://127.0.0.1:11434')
+  `).run().lastInsertRowid);
+  const modelId = Number(versionThree.prepare(`
+    INSERT INTO models (
+      model_name, display_name, provider_id, max_tokens,
+      input_cost_per_million, output_cost_per_million, model_config
+    ) VALUES ('v3-preserved-model', 'V3 preserved model', ?, 777, 1.25, 2.5, '{"preserve":true}')
+  `).run(providerId).lastInsertRowid);
+  versionThree.prepare(`
+    INSERT INTO users (username, api_token, allowed_models)
+    VALUES ('v3-preserved-user', 'v3-preserved-token', '["v3-preserved-model"]')
+  `).run();
+  const filterId = Number(versionThree.prepare(`
+    INSERT INTO content_filters (name, patterns, input_action, created_at, updated_at)
+    VALUES ('v3-preserved-filter', '["preserve"]', 'block',
+      '2026-01-02T03:04:05.000Z', '2026-01-02T03:04:05.000Z')
+  `).run().lastInsertRowid);
+  versionThree.prepare('INSERT INTO content_filter_models (filter_id, model_id) VALUES (?, ?)')
+    .run(filterId, modelId);
+  versionThree.pragma('user_version = 3');
+  versionThree.close();
+
+  assertMigrated(migrate(file));
+  const checked = open(file, { readonly: true });
+  assert.equal(checked.pragma('user_version', { simple: true }), 4);
+  assert.deepEqual(checked.prepare(`
+    SELECT model_name, provider_id, max_tokens, input_cost_per_million,
+           output_cost_per_million, model_config, context_window,
+           default_temperature, default_top_p, default_presence_penalty,
+           default_frequency_penalty, default_seed
+    FROM models WHERE model_name = 'v3-preserved-model'
+  `).get(), {
+    model_name: 'v3-preserved-model', provider_id: providerId,
+    max_tokens: 777, input_cost_per_million: 1.25,
+    output_cost_per_million: 2.5, model_config: '{"preserve":true}',
+    context_window: null, default_temperature: null, default_top_p: null,
+    default_presence_penalty: null, default_frequency_penalty: null,
+    default_seed: null
+  });
+  assert.deepEqual(checked.prepare(`
+    SELECT allowed_models FROM users WHERE username = 'v3-preserved-user'
+  `).get(), { allowed_models: '["v3-preserved-model"]' });
+  assert.deepEqual(checked.prepare(`
+    SELECT filter_id, model_id FROM content_filter_models
+    WHERE filter_id = ? AND model_id = ?
+  `).get(filterId, modelId), { filter_id: filterId, model_id: modelId });
+  checked.close();
 });
 
 test('version 2 with a preexisting exact active filter table fails before adoption', () => {
@@ -481,7 +565,7 @@ test('current schema missing the content filter join table or model index fails 
     {
       missing: 'join-table',
       failed: true,
-      schemaVersion: 3,
+      schemaVersion: 4,
       filter: { name: 'keep-join-table', patterns: '[]', input_action: 'block', is_active: 1 },
       joinTableExists: false,
       modelIndexExists: false
@@ -489,7 +573,7 @@ test('current schema missing the content filter join table or model index fails 
     {
       missing: 'model-index',
       failed: true,
-      schemaVersion: 3,
+      schemaVersion: 4,
       filter: { name: 'keep-model-index', patterns: '[]', input_action: 'block', is_active: 1 },
       joinTableExists: true,
       modelIndexExists: false
@@ -517,16 +601,34 @@ test('migration is repeatable on an already-current database', () => {
     VALUES ('current-filter', '["current"]', 'mask', '2026-01-02T03:04:05.000Z', '2026-01-02T03:04:05.000Z')
   `).run().lastInsertRowid);
   current.prepare('INSERT INTO content_filter_models (filter_id, model_id) VALUES (?, ?)').run(filterId, modelId);
+  current.prepare(`
+    UPDATE models SET context_window = 8192, default_temperature = 0,
+      default_top_p = 0.75, default_presence_penalty = -1.5,
+      default_frequency_penalty = 1.25, default_seed = 0
+    WHERE id = ?
+  `).run(modelId);
   current.close();
 
   assertMigrated(migrate(file));
   assertMigrated(migrate(file));
   const database = open(file, { readonly: true });
-  assert.equal(database.pragma('user_version', { simple: true }), 3);
+  assert.equal(database.pragma('user_version', { simple: true }), 4);
   assert.equal(database.prepare('SELECT COUNT(*) AS count FROM user_tokens').get().count, 1);
   assert.deepEqual(database.prepare(`
     SELECT filter_id, model_id FROM content_filter_models
   `).get(), { filter_id: filterId, model_id: modelId });
+  assert.deepEqual(database.prepare(`
+    SELECT context_window, default_temperature, default_top_p,
+      default_presence_penalty, default_frequency_penalty, default_seed
+    FROM models WHERE id = ?
+  `).get(modelId), {
+    context_window: 8192,
+    default_temperature: 0,
+    default_top_p: 0.75,
+    default_presence_penalty: -1.5,
+    default_frequency_penalty: 1.25,
+    default_seed: 0
+  });
   assert.equal(database.prepare('SELECT api_token FROM users WHERE username = ?').pluck().get('repeatable-user'),
     'sha256:e2b387d319648f1ad7ed6608b2ad03580652fd49794407a83d5184a6f3a58636');
   assert.deepEqual(database.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name").pluck().all(), [
@@ -569,7 +671,7 @@ test('current database preserves positive and accepts zero user quotas on repeat
     },
     { username: 'zero-quota-user', max_daily_input_tokens: 0, max_daily_output_tokens: 0 }
   ]);
-  assert.equal(checked.pragma('user_version', { simple: true }), 3);
+  assert.equal(checked.pragma('user_version', { simple: true }), 4);
   checked.close();
 });
 
@@ -582,10 +684,10 @@ test('post-migration integrity failure rolls back changes', () => {
   assert.equal(database.prepare("SELECT COUNT(*) AS count FROM sqlite_master WHERE type = 'table' AND name = 'users'").get().count, 0);
   database.close();
 });
-test('future v4 schema is rejected without mutation', () => {
+test('future v5 schema is rejected without mutation', () => {
   const file = databasePath('future');
   const database = open(file);
-  database.exec('CREATE TABLE sentinel (id INTEGER PRIMARY KEY, value TEXT NOT NULL); INSERT INTO sentinel VALUES (1, \'keep\'); PRAGMA user_version = 4;');
+  database.exec('CREATE TABLE sentinel (id INTEGER PRIMARY KEY, value TEXT NOT NULL); INSERT INTO sentinel VALUES (1, \'keep\'); PRAGMA user_version = 5;');
   assert.equal(database.pragma('journal_mode', { simple: true }), 'delete');
   database.close();
   const bytesBefore = fs.readFileSync(file);
@@ -594,7 +696,7 @@ test('future v4 schema is rejected without mutation', () => {
   const result = migrate(file);
   assert.notEqual(result.status, 0);
   const checked = open(file, { readonly: true });
-  assert.equal(checked.pragma('user_version', { simple: true }), 4);
+  assert.equal(checked.pragma('user_version', { simple: true }), 5);
   assert.equal(checked.pragma('journal_mode', { simple: true }), 'delete');
   assert.equal(checked.prepare('SELECT value FROM sentinel WHERE id = 1').pluck().get(), 'keep');
   assert.equal(checked.prepare("SELECT COUNT(*) AS count FROM sqlite_master WHERE type = 'table' AND name = 'users'").get().count, 0);
@@ -610,13 +712,13 @@ test('checkpointed WAL future schema is rejected without creating sidecars', () 
   const file = databasePath('future-clean-wal');
   const database = open(file);
   assert.equal(database.pragma('journal_mode = WAL', { simple: true }), 'wal');
-  database.exec("CREATE TABLE sentinel (id INTEGER PRIMARY KEY, value TEXT NOT NULL); INSERT INTO sentinel VALUES (1, 'keep'); PRAGMA user_version = 4;");
+  database.exec("CREATE TABLE sentinel (id INTEGER PRIMARY KEY, value TEXT NOT NULL); INSERT INTO sentinel VALUES (1, 'keep'); PRAGMA user_version = 5;");
   assert.equal(database.pragma('wal_checkpoint(TRUNCATE)')[0].busy, 0);
   database.close();
   const bytesBefore = fs.readFileSync(file);
   const hashBefore = crypto.createHash('sha256').update(bytesBefore).digest('hex');
   assert.deepEqual([...bytesBefore.subarray(18, 20)], [2, 2]);
-  assert.equal(bytesBefore.readUInt32BE(60), 4);
+  assert.equal(bytesBefore.readUInt32BE(60), 5);
   assert.equal(fs.existsSync(`${file}-wal`), false);
   assert.equal(fs.existsSync(`${file}-shm`), false);
 
