@@ -224,7 +224,9 @@ function createDashboardHarness({ storedKey = '', fetchOverride, confirmResult =
   const statsForm = new FakeForm({ range: '24h', start: '', end: '' });
   const requests = [];
   const clipboardWrites = [];
+  const sessionValues = new Map(storedKey ? [['llmGatewayAdminKey', storedKey]] : []);
   let confirmCount = 0;
+  let promptCount = 0;
   const builtInPiiForm = new FakeForm();
   builtInPiiForm.elements.isActive = new FakeNode();
   let builtInPiiActive = false;
@@ -311,10 +313,14 @@ function createDashboardHarness({ storedKey = '', fetchOverride, confirmResult =
       if (route.startsWith('/admin/stats?')) return response({ summary: {}, period: {}, by_user: [], by_model: [], by_provider: [], recent_requests: [] });
       throw new Error(`Unexpected route: ${route}`);
     },
-    sessionStorage: { getItem: () => storedKey, setItem() {}, removeItem() {} },
+    sessionStorage: {
+      getItem: (key) => sessionValues.get(key) || null,
+      setItem: (key, value) => sessionValues.set(key, String(value)),
+      removeItem: (key) => sessionValues.delete(key),
+    },
     window: new FakeNode(),
   };
-  context.window.prompt = () => { throw new Error('Resource flows must not call window.prompt'); };
+  context.window.prompt = () => { promptCount += 1; throw new Error('Resource flows must not call window.prompt'); };
   context.window.confirm = () => { confirmCount += 1; return confirmResult; };
   context.window.addEventListener = () => {};
   vm.runInNewContext(fs.readFileSync(path.join(__dirname, '..', 'public', 'admin-dashboard.js'), 'utf8'), context);
@@ -344,9 +350,18 @@ function createDashboardHarness({ storedKey = '', fetchOverride, confirmResult =
     providerCancel: document.getElementById('provider-cancel'),
     userTokenResult: document.getElementById('user-token-result'),
     userTokenValue: document.getElementById('user-token-value'),
+    userTokenCopy: document.getElementById('user-token-copy'),
     userTokenClose: document.getElementById('user-token-close'),
+    userSubmit: document.getElementById('user-submit'),
+    userDialogStatus: document.getElementById('user-dialog-status'),
+    confirmForm: document.getElementById('confirm-form'),
+    confirmSubmit: document.getElementById('confirm-submit'),
+    confirmMessage: document.getElementById('confirm-message'),
+    confirmDialogStatus: document.getElementById('confirm-dialog-status'),
     clipboardWrites,
+    sessionValues,
     get confirmCount() { return confirmCount; },
+    get promptCount() { return promptCount; },
     window: context.window,
   };
 }
@@ -444,51 +459,6 @@ test('backdrop clicks do not discard resource forms', () => {
   assert.equal(harness.providerDialog.open, true);
   assert.equal(harness.providerForm.elements.baseUrl.value, 'https://provider.example/v1');
   assert.equal(harness.confirmCount, 0);
-});
-
-test('successful legacy token rotation opens a clearable one-time token result', async () => {
-  const user = {
-    id: 7,
-    username: 'rotation-user',
-    is_active: true,
-    max_daily_input_tokens: 0,
-    max_daily_output_tokens: 0,
-    permissions_valid: true,
-    allowed_models: [],
-    created_at: '2026-08-13T00:00:00.000Z',
-  };
-  const token = 'rotated-<token>';
-  const harness = createDashboardHarness({
-    storedKey: 'stored-admin-key',
-    confirmResult: true,
-    fetchOverride(route, options) {
-      if (route === '/admin/users') return response([user]);
-      if (route === '/admin/users/7/rotate-token' && options.method === 'POST') {
-        return response({ apiToken: token });
-      }
-      return undefined;
-    },
-  });
-  await settle();
-  const rotate = findButton(harness.usersContent, 'Rotate token');
-  assert.ok(rotate);
-
-  rotate.dispatchEvent(new Event('click'));
-  await settle();
-
-  assert.equal(harness.confirmCount, 1);
-  assert.equal(harness.requests.filter(({ route }) => route === '/admin/users/7/rotate-token').length, 1);
-  assert.equal(harness.userDialog.open, true);
-  assert.equal(harness.userForm.classList.contains('hidden'), true);
-  assert.equal(harness.userTokenResult.classList.contains('hidden'), false);
-  assert.equal(harness.userTokenValue.textContent, token);
-  assert.equal(harness.userTokenValue.children.length, 0);
-  assert.equal(harness.status.textContent.includes(token), false);
-  harness.userTokenClose.dispatchEvent(new Event('click'));
-  assert.equal(harness.userDialog.open, false);
-  assert.equal(harness.userTokenValue.textContent, '');
-  assert.equal(harness.userTokenResult.classList.contains('hidden'), true);
-  assert.equal(rotate.focusCount, 1);
 });
 
 test('built-in PII filter saves its active state and renders rules as safe list items', async () => {
@@ -594,51 +564,287 @@ test('stored-key initial loading preserves a statistics error after delayed conf
   assert.equal(status.className, 'status error');
 });
 
-test('dashboard renders zero quotas as unlimited and explains zero while editing', async () => {
+
+test('user create submits once and shows a one-time token until explicitly closed', async () => {
+  const mutation = deferred();
+  const token = 'created-<token>';
+  let userLoads = 0;
+  const harness = createDashboardHarness({
+    storedKey: 'stored-admin-key',
+    fetchOverride(route, options) {
+      if (route === '/admin/users' && options.method === 'POST') return mutation.promise;
+      if (route === '/admin/users' && !options.method) {
+        userLoads += 1;
+        if (userLoads === 1) return response([]);
+        return { ok: false, status: 500, json: async () => ({ error: 'Refresh failed.' }) };
+      }
+      return undefined;
+    },
+  });
+  await settle();
+
+  harness.createUser.dispatchEvent(new Event('click'));
+  harness.userForm.elements.username.value = 'alice';
+  harness.userForm.elements.inputQuota.value = '0';
+  harness.userForm.elements.outputQuota.value = '0';
+  harness.userForm.elements.allowedModels.value = 'model-a, model-b';
+  harness.userForm.dispatchEvent(new Event('submit', { cancelable: true }));
+  harness.userForm.dispatchEvent(new Event('submit', { cancelable: true }));
+  await settle();
+
+  const posts = harness.requests.filter(({ route, options }) => route === '/admin/users' && options.method === 'POST');
+  assert.equal(posts.length, 1);
+  assert.deepEqual(JSON.parse(posts[0].options.body), {
+    username: 'alice',
+    max_daily_input_tokens: 0,
+    max_daily_output_tokens: 0,
+    allowed_models: ['model-a', 'model-b'],
+  });
+  assert.equal(harness.userSubmit.disabled, true);
+
+  mutation.resolve(response({ apiToken: token }));
+  await settle();
+
+  assert.equal(harness.userDialog.open, true);
+  assert.equal(harness.userForm.classList.contains('hidden'), true);
+  assert.equal(harness.userTokenResult.classList.contains('hidden'), false);
+  assert.equal(harness.userTokenValue.textContent, token);
+  assert.equal(harness.userTokenValue.children.length, 0);
+  assert.equal(harness.userTokenCopy.focusCount, 1);
+  assert.equal(harness.status.textContent, 'Refresh failed.');
+  assert.equal(harness.status.textContent.includes(token), false);
+  assert.equal([...harness.sessionValues.values()].includes(token), false);
+
+  harness.userTokenCopy.dispatchEvent(new Event('click'));
+  await settle();
+  assert.deepEqual(harness.clipboardWrites, [token]);
+
+  harness.userTokenClose.dispatchEvent(new Event('click'));
+  assert.equal(harness.userDialog.open, false);
+  assert.equal(harness.userTokenValue.textContent, '');
+  assert.equal(harness.createUser.focusCount, 1);
+});
+
+test('user edit populates supported fields without enabling username rename', async () => {
   const user = {
-    id: 1,
-    username: 'unlimited-user',
+    id: 7,
+    username: 'alice',
     is_active: true,
     max_daily_input_tokens: 0,
     max_daily_output_tokens: 0,
     permissions_valid: true,
-    allowed_models: [],
-    created_at: '2026-08-12T00:00:00.000Z',
+    allowed_models: ['model-a', 'model-b'],
+    created_at: '2026-08-13T00:00:00.000Z',
   };
-  const positiveQuotaUser = {
-    id: 2,
-    username: 'limited-user',
-    is_active: true,
-    max_daily_input_tokens: 1234567,
-    max_daily_output_tokens: 7654321,
-    permissions_valid: true,
-    allowed_models: [],
-    created_at: '2026-08-12T00:00:00.000Z',
-  };
+  const mutation = deferred();
   const harness = createDashboardHarness({
     storedKey: 'stored-admin-key',
-    fetchOverride(route) {
-      if (route === '/admin/users') return response([user, positiveQuotaUser]);
+    fetchOverride(route, options) {
+      if (route === '/admin/users') return response([user]);
+      if (route === '/admin/users/7' && options.method === 'PUT') return mutation.promise;
       return undefined;
     },
   });
-  const prompts = [];
-  harness.window.prompt = (label, initialValue) => {
-    prompts.push([label, initialValue]);
-    return prompts.length === 1 ? initialValue : null;
-  };
+  await settle();
+  const oldEdit = findButton(harness.usersContent, 'Edit');
+
+  oldEdit.dispatchEvent(new Event('click'));
+  assert.equal(harness.userDialog.open, true);
+  assert.equal(harness.userForm.elements.userId.value, '7');
+  assert.equal(harness.userForm.elements.username.value, 'alice');
+  assert.equal(harness.userForm.elements.username.disabled, true);
+  assert.equal(harness.userForm.elements.inputQuota.value, '0');
+  assert.equal(harness.userForm.elements.outputQuota.value, '0');
+  assert.equal(harness.userForm.elements.allowedModels.value, 'model-a, model-b');
+  harness.userForm.dispatchEvent(new Event('submit', { cancelable: true }));
+  harness.userForm.dispatchEvent(new Event('submit', { cancelable: true }));
   await settle();
 
-  const renderedText = collectText(harness.usersContent);
-  assert.equal(renderedText.filter((text) => text === 'Unlimited').length, 2);
-  assert.ok(renderedText.includes(new Intl.NumberFormat().format(1234567)));
-  assert.ok(renderedText.includes(new Intl.NumberFormat().format(7654321)));
-  const edit = findButton(harness.usersContent, 'Edit');
-  assert.ok(edit);
-  edit.dispatchEvent(new Event('click'));
+  const puts = harness.requests.filter(({ route, options }) => route === '/admin/users/7' && options.method === 'PUT');
+  assert.equal(puts.length, 1);
+  assert.deepEqual(JSON.parse(puts[0].options.body), {
+    max_daily_input_tokens: 0,
+    max_daily_output_tokens: 0,
+    allowed_models: ['model-a', 'model-b'],
+  });
+  assert.equal(Object.hasOwn(JSON.parse(puts[0].options.body), 'username'), false);
+  assert.equal(harness.userSubmit.disabled, true);
 
-  assert.deepEqual(prompts, [
-    ['Daily input quota (0 = unlimited)', '0'],
-    ['Daily output quota (0 = unlimited)', '0'],
-  ]);
+  mutation.resolve(response(user));
+  await settle();
+
+  const newEdit = findButton(harness.usersContent, 'Edit');
+  assert.equal(harness.userDialog.open, false);
+  assert.notEqual(newEdit, oldEdit);
+  assert.equal(oldEdit.focusCount, 0);
+  assert.equal(newEdit.focusCount, 1);
+  assert.equal(harness.requests.filter(({ route, options }) => route === '/admin/users' && !options.method).length, 2);
+  assert.equal(harness.requests.filter(({ route }) => route.startsWith('/admin/stats?')).length, 1);
+  assert.equal(harness.promptCount, 0);
+  assert.equal(harness.confirmCount, 0);
+});
+
+test('user mutation errors stay local and preserve input', async () => {
+  const mutation = deferred();
+  const hostileError = '<script>invalid</script>';
+  const harness = createDashboardHarness({
+    storedKey: 'stored-admin-key',
+    fetchOverride(route, options) {
+      if (route === '/admin/users' && options.method === 'POST') return mutation.promise;
+      return undefined;
+    },
+  });
+  await settle();
+  harness.createUser.dispatchEvent(new Event('click'));
+  harness.userForm.elements.username.value = 'alice';
+  harness.userForm.elements.inputQuota.value = '17';
+  harness.userForm.elements.outputQuota.value = '23';
+  harness.userForm.elements.allowedModels.value = 'model-a';
+  harness.userForm.dispatchEvent(new Event('submit', { cancelable: true }));
+  harness.userForm.dispatchEvent(new Event('submit', { cancelable: true }));
+  await settle();
+  assert.equal(harness.requests.filter(({ route, options }) => route === '/admin/users' && options.method === 'POST').length, 1);
+  assert.equal(harness.userSubmit.disabled, true);
+
+  mutation.resolve({ ok: false, status: 400, json: async () => ({ error: hostileError }) });
+  await settle();
+
+  assert.equal(harness.userDialog.open, true);
+  assert.equal(harness.userForm.elements.username.value, 'alice');
+  assert.equal(harness.userForm.elements.inputQuota.value, '17');
+  assert.equal(harness.userForm.elements.outputQuota.value, '23');
+  assert.equal(harness.userForm.elements.allowedModels.value, 'model-a');
+  assert.equal(harness.userSubmit.disabled, false);
+  assert.equal(harness.userDialogStatus.textContent, hostileError);
+  assert.equal(harness.userDialogStatus.children.length, 0);
+  assert.equal(harness.status.textContent.includes(hostileError), false);
+});
+
+test('user deactivation is confirmed by name and uses DELETE while activation is direct PUT', async () => {
+  const active = {
+    id: 1, username: 'active-user', is_active: true,
+    max_daily_input_tokens: 0, max_daily_output_tokens: 0,
+    permissions_valid: true, allowed_models: [], created_at: '2026-08-13T00:00:00.000Z',
+  };
+  const inactive = { ...active, id: 2, username: 'inactive-user', is_active: false };
+  const deactivation = deferred();
+  let userLoads = 0;
+  const harness = createDashboardHarness({
+    storedKey: 'stored-admin-key',
+    fetchOverride(route, options) {
+      if (route === '/admin/users' && !options.method) {
+        userLoads += 1;
+        return response(userLoads === 1 ? [active, inactive] : [inactive]);
+      }
+      if (route === '/admin/users/1' && options.method === 'DELETE') return deactivation.promise;
+      if (route === '/admin/users/2' && options.method === 'PUT') return response({ ...inactive, is_active: true });
+      return undefined;
+    },
+  });
+  await settle();
+
+  findButton(harness.usersContent, 'Deactivate').dispatchEvent(new Event('click'));
+  assert.equal(harness.confirmDialog.open, true);
+  assert.match(harness.confirmMessage.textContent, /active-user/u);
+  harness.confirmForm.dispatchEvent(new Event('submit', { cancelable: true }));
+  harness.confirmForm.dispatchEvent(new Event('submit', { cancelable: true }));
+  await settle();
+  assert.equal(harness.requests.filter(({ route, options }) => route === '/admin/users/1' && options.method === 'DELETE').length, 1);
+  assert.equal(harness.confirmSubmit.disabled, true);
+
+  deactivation.resolve(response({}));
+  await settle();
+  const confirmOpenCount = harness.confirmDialog.showModalCount;
+  findButton(harness.usersContent, 'Activate').dispatchEvent(new Event('click'));
+  await settle();
+
+  const activation = harness.requests.filter(({ route, options }) => route === '/admin/users/2' && options.method === 'PUT');
+  assert.equal(activation.length, 1);
+  assert.deepEqual(JSON.parse(activation[0].options.body), { is_active: true });
+  assert.equal(harness.confirmDialog.showModalCount, confirmOpenCount);
+  assert.equal(harness.confirmCount, 0);
+});
+
+test('failed deactivation keeps confirmation open with its server error', async () => {
+  const user = {
+    id: 9, username: 'blocked-user', is_active: true,
+    max_daily_input_tokens: 0, max_daily_output_tokens: 0,
+    permissions_valid: true, allowed_models: [], created_at: '2026-08-13T00:00:00.000Z',
+  };
+  const mutation = deferred();
+  const error = '<script>cannot deactivate</script>';
+  const harness = createDashboardHarness({
+    storedKey: 'stored-admin-key',
+    fetchOverride(route, options) {
+      if (route === '/admin/users') return response([user]);
+      if (route === '/admin/users/9' && options.method === 'DELETE') return mutation.promise;
+      return undefined;
+    },
+  });
+  await settle();
+  findButton(harness.usersContent, 'Deactivate').dispatchEvent(new Event('click'));
+  harness.confirmForm.dispatchEvent(new Event('submit', { cancelable: true }));
+  harness.confirmForm.dispatchEvent(new Event('submit', { cancelable: true }));
+  await settle();
+  assert.equal(harness.requests.filter(({ route, options }) => route === '/admin/users/9' && options.method === 'DELETE').length, 1);
+  assert.equal(harness.confirmSubmit.disabled, true);
+
+  mutation.resolve({ ok: false, status: 400, json: async () => ({ error }) });
+  await settle();
+
+  assert.equal(harness.confirmDialog.open, true);
+  assert.equal(harness.confirmSubmit.disabled, false);
+  assert.equal(harness.confirmDialogStatus.textContent, error);
+  assert.equal(harness.confirmDialogStatus.children.length, 0);
+  assert.equal(harness.requests.filter(({ route, options }) => route === '/admin/users/9' && options.method === 'DELETE').length, 1);
+});
+
+test('token rotation requires confirmation and reuses the one-time token result', async () => {
+  const user = {
+    id: 11, username: 'rotation-user', is_active: true,
+    max_daily_input_tokens: 0, max_daily_output_tokens: 0,
+    permissions_valid: true, allowed_models: [], created_at: '2026-08-13T00:00:00.000Z',
+  };
+  const mutation = deferred();
+  const token = 'rotated-<token>';
+  const harness = createDashboardHarness({
+    storedKey: 'stored-admin-key',
+    fetchOverride(route, options) {
+      if (route === '/admin/users') return response([user]);
+      if (route === '/admin/users/11/rotate-token' && options.method === 'POST') return mutation.promise;
+      return undefined;
+    },
+  });
+  await settle();
+  const oldRotate = findButton(harness.usersContent, 'Rotate token');
+
+  oldRotate.dispatchEvent(new Event('click'));
+  assert.equal(harness.confirmDialog.open, true);
+  assert.match(harness.confirmMessage.textContent, /rotation-user/u);
+  harness.confirmForm.dispatchEvent(new Event('submit', { cancelable: true }));
+  harness.confirmForm.dispatchEvent(new Event('submit', { cancelable: true }));
+  await settle();
+  assert.equal(harness.requests.filter(({ route, options }) => route === '/admin/users/11/rotate-token' && options.method === 'POST').length, 1);
+  assert.equal(harness.confirmSubmit.disabled, true);
+
+  mutation.resolve(response({ apiToken: token }));
+  await settle();
+
+  const newRotate = findButton(harness.usersContent, 'Rotate token');
+  assert.equal(harness.confirmDialog.open, false);
+  assert.equal(harness.userDialog.open, true);
+  assert.equal(harness.userForm.classList.contains('hidden'), true);
+  assert.equal(harness.userTokenResult.classList.contains('hidden'), false);
+  assert.equal(harness.userTokenValue.textContent, token);
+  assert.equal(harness.userTokenValue.children.length, 0);
+  assert.equal(harness.status.textContent.includes(token), false);
+  assert.equal([...harness.sessionValues.values()].includes(token), false);
+  assert.notEqual(newRotate, oldRotate);
+
+  harness.userTokenClose.dispatchEvent(new Event('click'));
+  assert.equal(harness.userDialog.open, false);
+  assert.equal(harness.userTokenValue.textContent, '');
+  assert.equal(oldRotate.focusCount, 0);
+  assert.equal(newRotate.focusCount, 1);
+  assert.equal(harness.confirmCount, 0);
 });
