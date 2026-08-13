@@ -55,7 +55,8 @@ Rules are ordered from more specific/high-risk identifiers to broader formats. A
 
 1. Korean resident registration number
    - Accept 13 digits with an optional hyphen between the sixth and seventh digits.
-   - Require a valid encoded date, a valid century/sex digit in the resident range, digit boundaries, and the resident-number checksum.
+   - Require a valid encoded date, a valid century/sex digit in the resident range, and digit boundaries.
+   - Do not require the legacy resident-number checksum. Since October 12, 2020, newly assigned or changed resident numbers keep the birth-date and century/sex positions but use six random trailing digits, so a mandatory checksum would miss valid modern numbers. This deliberately favors protecting a structurally valid resident number over rejecting every unrelated 13-digit value; exact request-local restoration limits the effect of a false positive. See the [Ministry of the Interior and Safety announcement](https://www.mois.go.kr/frt/bbs/type002/commonSelectBoardArticle.do?bbsId=BBSMSTR_000000000205&nttId=75077).
 2. Korean foreigner registration number
    - Accept the same 13-digit layout.
    - Require a valid encoded date, a valid foreigner century/sex digit, digit boundaries, and the foreigner-number checksum.
@@ -168,7 +169,8 @@ This feature reduces disclosure of supported input PII and secrets to the regist
 
 ### Unit coverage
 
-- Positive, negative, separator, boundary, invalid-date, and invalid-checksum fixtures for resident and foreigner registration numbers.
+- Positive, negative, separator, boundary, invalid-date, and invalid-century/sex fixtures for resident registration numbers, including legacy-checksum and post-2020 random-tail forms.
+- Positive, negative, separator, boundary, invalid-date, invalid-century/sex, and invalid-checksum fixtures for foreigner registration numbers.
 - Supported and deliberately excluded Korean telephone formats.
 - Conservative email boundaries, Luhn card validation, and IPv4 octet validation.
 - Complete high-confidence secret matches, truncated lookalikes, and secret precedence over PII.
