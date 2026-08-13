@@ -284,6 +284,15 @@ test('security headers and no-store protect browser and admin responses', async 
   assert.match(script.headers.get('content-type') || '', /^(?:application|text)\/javascript\b/);
 });
 
+test('admin dashboard serves zero quota form defaults', async () => {
+  const response = await fetch(`${baseUrl}/admin/`);
+  const body = await response.text();
+
+  assert.equal(response.status, 200);
+  assert.match(body, /<label>Daily input quota \(0 = unlimited\) <input name="inputQuota" type="number" min="0" value="0" required><\/label>/);
+  assert.match(body, /<label>Daily output quota \(0 = unlimited\) <input name="outputQuota" type="number" min="0" value="0" required><\/label>/);
+});
+
 test('health check and admin authentication', async () => {
   assert.equal((await request('/health')).status, 200);
   assert.equal((await request('/v1/models')).status, 401);
