@@ -125,6 +125,10 @@
             <label>Seed <input name="defaultSeed" type="number" min="-9007199254740991" max="9007199254740991" step="1" placeholder="Provider default" aria-describedby="model-defaults-help"></label>
           </div>
         </details>
+        <section id="model-discovery" class="hidden" aria-labelledby="model-discovery-title">
+          <h3 id="model-discovery-title">Discovered model identifiers</h3>
+          <ul id="model-discovery-list"></ul>
+        </section>
         <div id="model-dialog-status" class="status hidden" role="status" aria-live="polite"></div>
         <div class="dialog-actions"><button id="model-submit" type="submit">Create model</button><button id="model-cancel" type="button" class="secondary">Cancel</button></div>
       </form>

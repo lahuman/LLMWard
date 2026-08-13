@@ -267,6 +267,7 @@ function createDashboardHarness({ storedKey = '', fetchOverride, confirmResult =
   for (const id of [
     'user-dialog-title', 'user-dialog-description', 'user-dialog-status', 'user-token-result', 'user-token-value',
     'model-dialog-title', 'model-dialog-description', 'model-dialog-status', 'model-advanced',
+    'model-discovery', 'model-discovery-list',
     'provider-dialog-title', 'provider-dialog-description', 'provider-dialog-status',
     'provider-preset-field', 'provider-env-field',
     'confirm-title', 'confirm-message', 'confirm-dialog-status',
@@ -338,6 +339,8 @@ function createDashboardHarness({ storedKey = '', fetchOverride, confirmResult =
     builtInPiiState: document.getElementById('built-in-pii-state'),
 
     usersContent: document.getElementById('users-content'),
+    modelsContent: document.getElementById('models-content'),
+    providersContent: document.getElementById('providers-content'),
     createUser: document.getElementById('create-user'),
     createModel: document.getElementById('create-model'),
     createProvider: document.getElementById('create-provider'),
@@ -355,6 +358,10 @@ function createDashboardHarness({ storedKey = '', fetchOverride, confirmResult =
     userTokenClose: document.getElementById('user-token-close'),
     userSubmit: document.getElementById('user-submit'),
     userDialogStatus: document.getElementById('user-dialog-status'),
+    modelSubmit: document.getElementById('model-submit'),
+    modelDialogStatus: document.getElementById('model-dialog-status'),
+    modelDiscovery: document.getElementById('model-discovery'),
+    modelDiscoveryList: document.getElementById('model-discovery-list'),
     confirmForm: document.getElementById('confirm-form'),
     confirmSubmit: document.getElementById('confirm-submit'),
     confirmMessage: document.getElementById('confirm-message'),
@@ -383,6 +390,42 @@ function findButton(node, label) {
 async function settle() {
   await new Promise((resolve) => setImmediate(resolve));
   await new Promise((resolve) => setImmediate(resolve));
+}
+
+function dashboardModel(overrides = {}) {
+  return {
+    id: 31,
+    model_name: 'model-a',
+    display_name: 'Model A',
+    provider_id: 7,
+    provider_name: 'provider-a',
+    max_tokens: 4096,
+    context_window: null,
+    input_cost_per_million: null,
+    output_cost_per_million: null,
+    default_temperature: null,
+    default_top_p: null,
+    default_presence_penalty: null,
+    default_frequency_penalty: null,
+    default_seed: null,
+    is_active: true,
+    ...overrides,
+  };
+}
+
+function dashboardProvider(overrides = {}) {
+  return {
+    id: 7,
+    provider_name: 'provider-a',
+    display_name: 'Provider A',
+    base_url: 'https://provider.example/v1',
+    auth_type: 'none',
+    hasApiKey: false,
+    health_status: 'unknown',
+    last_health_check: null,
+    is_active: true,
+    ...overrides,
+  };
 }
 test('filters tab keeps the built-in PII filter before its sibling usage guide', () => {
   const html = fs.readFileSync(path.join(__dirname, '..', 'public', 'admin-dashboard.html'), 'utf8');
@@ -997,4 +1040,335 @@ test('token copy rejection feedback stays visible and announceable in result mod
   assert.equal(harness.userDialogStatus.className, 'status error');
   assert.equal(harness.userDialogStatus.children.length, 0);
   assert.equal(harness.status.textContent.includes(clipboardError), false);
+});
+
+test('model dialog exposes typed advanced defaults without arbitrary JSON', () => {
+  const html = fs.readFileSync(path.join(__dirname, '..', 'public', 'admin-dashboard.html'), 'utf8');
+  const start = html.indexOf('<dialog id="model-dialog"');
+  const dialog = html.slice(start, html.indexOf('</dialog>', start));
+  assert.match(dialog, /Context window \(tokens\)[\s\S]*name="contextWindow"[^>]*min="1"[^>]*max="9007199254740991"[^>]*step="1"/u);
+  assert.match(dialog, /does not reconfigure the provider/u);
+  assert.match(dialog, /<details id="model-advanced">\s*<summary>Advanced generation defaults<\/summary>/u);
+  for (const field of ['defaultTemperature', 'defaultTopP', 'defaultPresencePenalty', 'defaultFrequencyPenalty', 'defaultSeed']) {
+    assert.match(dialog, new RegExp(`name="${field}"`));
+  }
+  assert.doesNotMatch(dialog, /model_config|arbitrary JSON|num_ctx|max_model_len|n_ctx|provider runtime option/iu);
+});
+
+test('model table distinguishes Max output and Context', async () => {
+  const configured = dashboardModel({ context_window: 8192 });
+  const unknown = dashboardModel({ id: 32, model_name: 'model-b', display_name: 'Model B' });
+  const harness = createDashboardHarness({
+    storedKey: 'stored-admin-key',
+    fetchOverride(route) {
+      if (route === '/admin/models') return response([configured, unknown]);
+      if (route === '/admin/providers') return response([dashboardProvider()]);
+      return undefined;
+    },
+  });
+  await settle();
+  const texts = collectText(harness.modelsContent);
+  assert.ok(texts.includes('Max output'));
+  assert.ok(texts.includes('Context'));
+  assert.ok(texts.includes('8,192'));
+  assert.ok(texts.includes('Not configured'));
+  assert.equal(texts.includes('Max tokens'), false);
+});
+
+test('model create serializes blank defaults as null and preserves numeric zero', async () => {
+  const mutation = deferred();
+  const harness = createDashboardHarness({
+    fetchOverride(route, options) {
+      if (route === '/admin/models' && options.method === 'POST') return mutation.promise;
+      return undefined;
+    },
+  });
+  harness.createModel.dispatchEvent(new Event('click'));
+  Object.assign(harness.modelForm.elements.modelName, { value: 'typed-model' });
+  Object.assign(harness.modelForm.elements.displayName, { value: 'Typed Model' });
+  Object.assign(harness.modelForm.elements.providerId, { value: '7' });
+  Object.assign(harness.modelForm.elements.maxTokens, { value: '512' });
+  Object.assign(harness.modelForm.elements.inputPrice, { value: '1.25' });
+  Object.assign(harness.modelForm.elements.outputPrice, { value: '' });
+  Object.assign(harness.modelForm.elements.contextWindow, { value: '' });
+  Object.assign(harness.modelForm.elements.defaultTemperature, { value: '0' });
+  Object.assign(harness.modelForm.elements.defaultTopP, { value: '' });
+  Object.assign(harness.modelForm.elements.defaultPresencePenalty, { value: '-2' });
+  Object.assign(harness.modelForm.elements.defaultFrequencyPenalty, { value: '0' });
+  Object.assign(harness.modelForm.elements.defaultSeed, { value: '0' });
+  harness.modelForm.dispatchEvent(new Event('submit', { cancelable: true }));
+  harness.modelForm.dispatchEvent(new Event('submit', { cancelable: true }));
+  await settle();
+
+  const posts = harness.requests.filter(({ route, options }) => route === '/admin/models' && options.method === 'POST');
+  assert.equal(posts.length, 1);
+  assert.deepEqual(JSON.parse(posts[0].options.body), {
+    model_name: 'typed-model',
+    display_name: 'Typed Model',
+    provider_id: 7,
+    max_tokens: 512,
+    input_cost_per_million: 1.25,
+    output_cost_per_million: null,
+    context_window: null,
+    default_temperature: 0,
+    default_top_p: null,
+    default_presence_penalty: -2,
+    default_frequency_penalty: 0,
+    default_seed: 0,
+  });
+  assert.equal(harness.modelSubmit.disabled, true);
+  mutation.resolve(response(dashboardModel({ model_name: 'typed-model' })));
+  await settle();
+  assert.equal(harness.modelDialog.open, false);
+});
+
+test('model edit populates all fields and explicit blanks clear defaults', async () => {
+  const model = dashboardModel({
+    max_tokens: 2048,
+    context_window: 8192,
+    input_cost_per_million: 1.5,
+    output_cost_per_million: 2.5,
+    default_temperature: 0,
+    default_top_p: 0.75,
+    default_presence_penalty: -1.5,
+    default_frequency_penalty: 1.25,
+    default_seed: 0,
+  });
+  const harness = createDashboardHarness({
+    storedKey: 'stored-admin-key',
+    fetchOverride(route, options) {
+      if (route === '/admin/models') return response([model]);
+      if (route === '/admin/providers') return response([dashboardProvider()]);
+      if (route === '/admin/models/31' && options.method === 'PUT') return response(model);
+      return undefined;
+    },
+  });
+  await settle();
+  findButton(harness.modelsContent, 'Edit').dispatchEvent(new Event('click'));
+  assert.equal(harness.modelForm.elements.modelId.value, '31');
+  assert.equal(harness.modelForm.elements.modelName.value, 'model-a');
+  assert.equal(harness.modelForm.elements.displayName.value, 'Model A');
+  assert.equal(harness.modelForm.elements.providerId.value, '7');
+  assert.equal(harness.modelForm.elements.maxTokens.value, '2048');
+  assert.equal(harness.modelForm.elements.inputPrice.value, '1.5');
+  assert.equal(harness.modelForm.elements.outputPrice.value, '2.5');
+  assert.equal(harness.modelForm.elements.contextWindow.value, '8192');
+  assert.equal(harness.modelForm.elements.defaultTemperature.value, '0');
+  assert.equal(harness.modelForm.elements.defaultTopP.value, '0.75');
+  assert.equal(harness.modelForm.elements.defaultPresencePenalty.value, '-1.5');
+  assert.equal(harness.modelForm.elements.defaultFrequencyPenalty.value, '1.25');
+  assert.equal(harness.modelForm.elements.defaultSeed.value, '0');
+  for (const name of ['contextWindow', 'defaultTemperature', 'defaultTopP', 'defaultPresencePenalty', 'defaultFrequencyPenalty', 'defaultSeed']) {
+    harness.modelForm.elements[name].value = '';
+  }
+  harness.modelForm.dispatchEvent(new Event('submit', { cancelable: true }));
+  await settle();
+  const puts = harness.requests.filter(({ route, options }) => route === '/admin/models/31' && options.method === 'PUT');
+  assert.equal(puts.length, 1);
+  assert.deepEqual(JSON.parse(puts[0].options.body), {
+    model_name: 'model-a',
+    display_name: 'Model A',
+    provider_id: 7,
+    max_tokens: 2048,
+    input_cost_per_million: 1.5,
+    output_cost_per_million: 2.5,
+    context_window: null,
+    default_temperature: null,
+    default_top_p: null,
+    default_presence_penalty: null,
+    default_frequency_penalty: null,
+    default_seed: null,
+  });
+});
+
+test('model validation errors stay local and a refresh failure cannot repeat a successful update', async () => {
+  const model = dashboardModel();
+  let modelLoads = 0;
+  let puts = 0;
+  const harness = createDashboardHarness({
+    storedKey: 'stored-admin-key',
+    fetchOverride(route, options) {
+      if (route === '/admin/models' && !options.method) {
+        modelLoads += 1;
+        if (modelLoads === 1) return response([model]);
+        return { ok: false, status: 500, json: async () => ({ error: 'Model refresh failed.' }) };
+      }
+      if (route === '/admin/providers') return response([dashboardProvider()]);
+      if (route === '/admin/models' && options.method === 'POST') {
+        return { ok: false, status: 400, json: async () => ({ error: 'max_tokens must not exceed context_window' }) };
+      }
+      if (route === '/admin/models/31' && options.method === 'PUT') {
+        puts += 1;
+        return response(model);
+      }
+      return undefined;
+    },
+  });
+  await settle();
+  harness.createModel.dispatchEvent(new Event('click'));
+  harness.modelForm.elements.modelName.value = 'invalid-capacity';
+  harness.modelForm.elements.displayName.value = 'Invalid Capacity';
+  harness.modelForm.elements.providerId.value = '7';
+  harness.modelForm.elements.maxTokens.value = '512';
+  harness.modelForm.elements.contextWindow.value = '128';
+  harness.modelForm.dispatchEvent(new Event('submit', { cancelable: true }));
+  await settle();
+  assert.equal(harness.modelDialog.open, true);
+  assert.equal(harness.modelForm.elements.contextWindow.value, '128');
+  assert.equal(harness.modelDialogStatus.textContent, 'max_tokens must not exceed context_window');
+  assert.equal(harness.modelDialogStatus.children.length, 0);
+  assert.equal(harness.modelSubmit.disabled, false);
+
+  harness.modelCancel.dispatchEvent(new Event('click'));
+  const oldEdit = findButton(harness.modelsContent, 'Edit');
+  oldEdit.dispatchEvent(new Event('click'));
+  harness.modelForm.dispatchEvent(new Event('submit', { cancelable: true }));
+  harness.modelForm.dispatchEvent(new Event('submit', { cancelable: true }));
+  await settle();
+  assert.equal(puts, 1);
+  assert.equal(harness.modelDialog.open, false);
+  assert.equal(harness.status.textContent, 'Model refresh failed.');
+  assert.equal(harness.status.className, 'status error');
+  assert.equal(oldEdit.focusCount, 1);
+  harness.modelForm.dispatchEvent(new Event('submit', { cancelable: true }));
+  await settle();
+  assert.equal(puts, 1);
+});
+
+test('discover models opens locked create mode and accepts only returned identifiers', async () => {
+  const provider = dashboardProvider();
+  const discovered = [{ model_name: '<img src=x onerror=1>' }, { model_name: 'safe-model' }];
+  const harness = createDashboardHarness({
+    storedKey: 'stored-admin-key',
+    fetchOverride(route, options) {
+      if (route === '/admin/providers') return response([provider]);
+      if (route === '/admin/providers/7/discover-models') return response(discovered);
+      if (route === '/admin/models' && options.method === 'POST') return response(dashboardModel({ model_name: 'safe-model' }));
+      return undefined;
+    },
+  });
+  await settle();
+  findButton(harness.providersContent, 'Discover models').dispatchEvent(new Event('click'));
+  await settle();
+  assert.equal(harness.modelDialog.open, true);
+  assert.equal(harness.modelForm.elements.providerId.value, '7');
+  assert.equal(harness.modelForm.elements.providerId.disabled, true);
+  assert.equal(harness.modelForm.elements.modelName.value, '<img src=x onerror=1>');
+  assert.equal(harness.modelForm.elements.displayName.value, '<img src=x onerror=1>');
+  assert.equal(harness.modelForm.elements.modelName.focusCount, 1);
+  assert.deepEqual(harness.modelDiscoveryList.children.map((item) => item.tagName), ['LI', 'LI']);
+  assert.equal(harness.modelDiscoveryList.children[0].textContent, '<img src=x onerror=1>');
+  assert.equal(harness.modelDiscoveryList.children[0].children.length, 0);
+
+  harness.modelForm.elements.modelName.value = 'not-discovered';
+  harness.modelForm.dispatchEvent(new Event('submit', { cancelable: true }));
+  await settle();
+  assert.equal(harness.requests.filter(({ route, options }) => route === '/admin/models' && options.method === 'POST').length, 0);
+  assert.equal(harness.modelDialog.open, true);
+  assert.match(harness.modelDialogStatus.textContent, /discovered identifier/u);
+
+  harness.modelForm.elements.modelName.value = 'safe-model';
+  harness.modelForm.elements.displayName.value = 'Safe Model';
+  harness.modelForm.dispatchEvent(new Event('submit', { cancelable: true }));
+  await settle();
+  const posts = harness.requests.filter(({ route, options }) => route === '/admin/models' && options.method === 'POST');
+  assert.equal(posts.length, 1);
+  assert.equal(JSON.parse(posts[0].options.body).provider_id, 7);
+  assert.equal(harness.modelForm.elements.providerId.disabled, false);
+  assert.equal(harness.modelDiscoveryList.children.length, 0);
+  assert.equal(harness.modelDiscovery.classList.contains('hidden'), true);
+  assert.equal(harness.promptCount, 0);
+});
+
+test('empty model discovery reports status without opening a dialog', async () => {
+  const harness = createDashboardHarness({
+    storedKey: 'stored-admin-key',
+    fetchOverride(route) {
+      if (route === '/admin/providers') return response([dashboardProvider()]);
+      if (route === '/admin/providers/7/discover-models') return response([]);
+      return undefined;
+    },
+  });
+  await settle();
+  const openCount = harness.modelDialog.showModalCount;
+  findButton(harness.providersContent, 'Discover models').dispatchEvent(new Event('click'));
+  await settle();
+  assert.equal(harness.modelDialog.showModalCount, openCount);
+  assert.equal(harness.status.textContent, 'No unregistered models were found.');
+  assert.equal(harness.status.className, 'status success');
+  assert.equal(harness.promptCount, 0);
+});
+
+test('model deactivation and hard deletion use named confirmation', async () => {
+  const active = dashboardModel({ id: 41, model_name: 'active-model' });
+  const inactive = dashboardModel({ id: 42, model_name: 'inactive-model', is_active: false });
+  let deleted = false;
+  const harness = createDashboardHarness({
+    storedKey: 'stored-admin-key',
+    fetchOverride(route, options) {
+      if (route === '/admin/models' && !options.method) return response(deleted ? [inactive] : [active, inactive]);
+      if (route === '/admin/providers') return response([dashboardProvider()]);
+      if (route === '/admin/models/41' && options.method === 'PUT') return response({ ...active, is_active: false });
+      if (route === '/admin/models/42' && options.method === 'PUT') return response({ ...inactive, is_active: true });
+      if (route === '/admin/models/41' && options.method === 'DELETE') {
+        deleted = true;
+        return response({});
+      }
+      return undefined;
+    },
+  });
+  await settle();
+
+  findButton(harness.modelsContent, 'Deactivate').dispatchEvent(new Event('click'));
+  assert.equal(harness.confirmDialog.open, true);
+  assert.match(harness.confirmMessage.textContent, /active-model/u);
+  harness.confirmForm.dispatchEvent(new Event('submit', { cancelable: true }));
+  await settle();
+  const deactivations = harness.requests.filter(({ route, options }) => route === '/admin/models/41' && options.method === 'PUT');
+  assert.deepEqual(deactivations.map(({ options }) => JSON.parse(options.body)), [{ is_active: false }]);
+
+  const confirmCount = harness.confirmDialog.showModalCount;
+  findButton(harness.modelsContent, 'Activate').dispatchEvent(new Event('click'));
+  await settle();
+  const activations = harness.requests.filter(({ route, options }) => route === '/admin/models/42' && options.method === 'PUT');
+  assert.deepEqual(activations.map(({ options }) => JSON.parse(options.body)), [{ is_active: true }]);
+  assert.equal(harness.confirmDialog.showModalCount, confirmCount);
+
+  findButton(harness.modelsContent, 'Delete').dispatchEvent(new Event('click'));
+  assert.equal(harness.confirmDialog.open, true);
+  assert.match(harness.confirmMessage.textContent, /active-model/u);
+  harness.confirmForm.dispatchEvent(new Event('submit', { cancelable: true }));
+  await settle();
+  assert.equal(harness.requests.filter(({ route, options }) => route === '/admin/models/41' && options.method === 'DELETE').length, 1);
+  assert.equal(harness.createModel.focusCount, 1);
+  assert.equal(harness.confirmCount, 0);
+});
+
+test('model delete guards keep the confirmation open with the server error', async () => {
+  const model = dashboardModel({ id: 51, model_name: 'assigned-<model>' });
+  const error = '<script>Model is assigned to users</script>';
+  const harness = createDashboardHarness({
+    storedKey: 'stored-admin-key',
+    fetchOverride(route, options) {
+      if (route === '/admin/models') return response([model]);
+      if (route === '/admin/providers') return response([dashboardProvider()]);
+      if (route === '/admin/models/51' && options.method === 'DELETE') {
+        return { ok: false, status: 400, json: async () => ({ error }) };
+      }
+      return undefined;
+    },
+  });
+  await settle();
+  const originalTable = harness.modelsContent.children[0];
+  findButton(harness.modelsContent, 'Delete').dispatchEvent(new Event('click'));
+  harness.confirmForm.dispatchEvent(new Event('submit', { cancelable: true }));
+  harness.confirmForm.dispatchEvent(new Event('submit', { cancelable: true }));
+  await settle();
+  assert.equal(harness.requests.filter(({ route, options }) => route === '/admin/models/51' && options.method === 'DELETE').length, 1);
+  assert.equal(harness.confirmDialog.open, true);
+  assert.equal(harness.confirmSubmit.disabled, false);
+  assert.equal(harness.confirmDialogStatus.textContent, error);
+  assert.equal(harness.confirmDialogStatus.children.length, 0);
+  assert.equal(harness.modelsContent.children[0], originalTable);
+  assert.equal(harness.confirmCount, 0);
 });
