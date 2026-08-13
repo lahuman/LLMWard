@@ -13,7 +13,7 @@ const adminKey = crypto.randomBytes(32).toString('base64url');
 
 process.env.ADMIN_SECRET_KEY = adminKey;
 process.env.DATABASE_PATH = databasePath;
-process.env.KERNEXA_TIMEOUT = '3000';
+process.env.LLMWARD_PROVIDER_TIMEOUT_MS = '3000';
 process.env.LOG_LEVEL = 'silent';
 
 let gatewayServer;

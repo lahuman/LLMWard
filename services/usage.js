@@ -88,7 +88,7 @@ function reserveQuota(user, requestedMaxTokens, modelMaxTokens) {
 
     const maxTokens = Math.min(requestedMaxTokens || modelMaxTokens, modelMaxTokens, remaining);
     const requestId = crypto.randomUUID();
-    const expiresAt = new Date(now.getTime() + config.providerTimeout + 30000).toISOString();
+    const expiresAt = new Date(now.getTime() + config.providerTimeoutMs + 30000).toISOString();
     db.prepare(`
       INSERT INTO quota_reservations
         (request_id, user_id, request_date, output_tokens, expires_at)

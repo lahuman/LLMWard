@@ -108,7 +108,7 @@ test('SIGTERM aborts held requests and exits cleanly before the force limit', as
     DATABASE_PATH: databasePath,
     HOST: '127.0.0.1',
     PORT: String(port),
-    KERNEXA_TIMEOUT: '30000',
+    LLMWARD_PROVIDER_TIMEOUT_MS: '30000',
     CORS_ORIGIN: 'http://127.0.0.1',
     LOG_LEVEL: 'info'
   };

@@ -84,7 +84,7 @@ async function testProvider(providerId) {
   try {
     const response = await fetch(buildProviderEndpoint(provider.base_url, 'models'), {
       headers: getAuthHeaders(provider),
-      signal: AbortSignal.timeout(Math.min(config.providerTimeout, 10000)),
+      signal: AbortSignal.timeout(Math.min(config.providerTimeoutMs, 10000)),
       redirect: 'manual'
     });
     status = response.ok ? 'healthy' : 'unhealthy';
@@ -110,7 +110,7 @@ async function discoverModels(providerId) {
   if (!provider || !provider.is_active) throw new Error('Provider is unavailable');
   const response = await fetch(buildProviderEndpoint(provider.base_url, 'models'), {
     headers: getAuthHeaders(provider),
-    signal: AbortSignal.timeout(Math.min(config.providerTimeout, 10000)),
+    signal: AbortSignal.timeout(Math.min(config.providerTimeoutMs, 10000)),
     redirect: 'manual'
   });
   if (response.status >= 300 && response.status < 400) throw new Error('Provider redirect was rejected');

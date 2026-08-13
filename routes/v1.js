@@ -116,7 +116,7 @@ router.post('/chat/completions', validateToken, validateModelAccess, async (req,
     const payload = { ...filteredBody, max_tokens: reservation.maxTokens };
     contentFilters.assertRequestSize(payload);
     const serializedPayload = JSON.stringify(payload);
-    timeout = setTimeout(() => controller.abort(), config.providerTimeout);
+    timeout = setTimeout(() => controller.abort(), config.providerTimeoutMs);
     const response = await fetch(buildProviderEndpoint(req.gatewayModel.base_url, 'chat/completions'), {
       method: 'POST',
       headers: getAuthHeaders(req.gatewayModel),

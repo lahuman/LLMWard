@@ -11,6 +11,14 @@ function positiveInteger(value, fallback, name) {
   return parsed;
 }
 
+function timeoutInteger(value, fallback, name) {
+  const parsed = positiveInteger(value, fallback, name);
+  if (parsed > 2147483647) {
+    throw new Error(`${name} must not exceed 2147483647`);
+  }
+  return parsed;
+}
+
 function nonNegativeInteger(value, fallback, name) {
   const parsed = value === undefined ? fallback : Number(value);
   if (!Number.isSafeInteger(parsed) || parsed < 0) {
@@ -57,7 +65,21 @@ module.exports = {
   host: process.env.HOST || '0.0.0.0',
   adminKey: validateAdminKey(process.env.ADMIN_SECRET_KEY),
   databasePath,
-  providerTimeout: positiveInteger(process.env.KERNEXA_TIMEOUT, 60000, 'KERNEXA_TIMEOUT'),
+  providerTimeoutMs: timeoutInteger(
+    process.env.LLMWARD_PROVIDER_TIMEOUT_MS,
+    60000,
+    'LLMWARD_PROVIDER_TIMEOUT_MS'
+  ),
+  streamIdleTimeoutMs: timeoutInteger(
+    process.env.LLMWARD_STREAM_IDLE_TIMEOUT_MS,
+    120000,
+    'LLMWARD_STREAM_IDLE_TIMEOUT_MS'
+  ),
+  streamMaxDurationMs: timeoutInteger(
+    process.env.LLMWARD_STREAM_MAX_DURATION_MS,
+    1800000,
+    'LLMWARD_STREAM_MAX_DURATION_MS'
+  ),
   corsOrigin: validateCorsOrigin(process.env.CORS_ORIGIN),
   requestLogRetentionDays: nonNegativeInteger(
     process.env.REQUEST_LOG_RETENTION_DAYS,

@@ -21,7 +21,7 @@ async function main() {
   const temporaryDirectory = fs.mkdtempSync(path.join(os.tmpdir(), 'llm-gateway-benchmark-'));
   process.env.ADMIN_SECRET_KEY = crypto.randomBytes(32).toString('base64url');
   process.env.DATABASE_PATH = path.join(temporaryDirectory, 'benchmark.db');
-  process.env.KERNEXA_TIMEOUT = '5000';
+  process.env.LLMWARD_PROVIDER_TIMEOUT_MS = '5000';
   process.env.LOG_LEVEL = 'silent';
 
   const provider = http.createServer(async (req, res) => {

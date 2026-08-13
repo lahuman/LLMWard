@@ -17,7 +17,7 @@ const providerKey = process.env.TEST_PROVIDER_API_KEY || crypto.randomBytes(24).
 
 process.env.ADMIN_SECRET_KEY = adminKey;
 process.env.DATABASE_PATH = databasePath;
-process.env.KERNEXA_TIMEOUT = '3000';
+process.env.LLMWARD_PROVIDER_TIMEOUT_MS = '3000';
 process.env.LOG_LEVEL = 'silent';
 
 let gatewayServer;
