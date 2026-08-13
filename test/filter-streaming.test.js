@@ -420,9 +420,13 @@ test('usage is read before a same-event filter failure and charged exactly once'
 
 test('active filtering preserves upstream, quota, and concurrency cleanup on disconnect', async (t) => {
   addOutputFilter(['foo']);
+  setBuiltInPiiActive();
+  const resident = '000229-3123456';
+  let providerContent;
   let interval;
   let upstreamClosed = false;
-  providerHandler = async (req, res) => {
+  providerHandler = async (req, res, payload) => {
+    providerContent = payload.messages[0].content;
     res.writeHead(200, { 'Content-Type': 'text/event-stream; charset=utf-8' });
     res.on('close', () => {
       upstreamClosed = true;
@@ -452,7 +456,7 @@ test('active filtering preserves upstream, quota, and concurrency cleanup on dis
   });
   client.end(JSON.stringify({
     model: 'filter-streaming', stream: true, max_tokens: 20,
-    messages: [{ role: 'user', content: 'ordinary' }]
+    messages: [{ role: 'user', content: resident }]
   }));
   t.after(() => {
     clearInterval(interval);
@@ -467,6 +471,8 @@ test('active filtering preserves upstream, quota, and concurrency cleanup on dis
   );
   const { state } = require('../services/limits');
   assert.equal(upstreamClosed, true);
+  assert.equal(providerContent.includes(resident), false);
+  assert.match(providerContent, /^\[\[LLMWARD:/u);
   assert.equal(state().users[user.id], undefined);
   assert.equal(state().models['filter-streaming'], undefined);
   assert.equal(state().providers[providerId], undefined);
@@ -878,4 +884,86 @@ test('request-owned PII stream restoration survives byte and event token splits'
   const text = await response.text();
   assert.equal(streamedContent(dataEvents(text), 0), resident);
   assert.equal(text.includes(placeholder), false);
+});
+
+
+test('request-owned PII streaming handles interleaving, terminal flushes, and token splits', async () => {
+  const resident = '000229-3123456';
+  const secret = 'AKIAABCDEFGHIJKLMNOP';
+  setBuiltInPiiActive();
+  let requestNumber = 0;
+  providerHandler = async (req, res, payload) => {
+    requestNumber += 1;
+    const providerContent = payload.messages[0].content;
+    assert.equal(providerContent.includes(resident), false);
+    assert.equal(providerContent.includes(secret), false);
+    const tokens = providerContent.match(/\[\[LLMWARD:[^\]]+\]\]/gu);
+    const piiToken = tokens.find((token) => token.includes(':kr_resident_registration_number:'));
+    const secretToken = tokens.find((token) => token.includes(':aws_access_key_id:'));
+    if (requestNumber === 2) {
+      const event = Buffer.from('data: ' + JSON.stringify({
+        choices: [{ index: 0, delta: { content: piiToken } }]
+      }) + '\n\n');
+      await writeChunks(res, splitBuffer(event, [1, 6, event.length - 1]));
+      return;
+    }
+
+    const fabricated = piiToken.replace(/:\d{6}\]\]$/u, ':999999]]');
+    const partial = piiToken.slice(0, -2);
+    const event = (choices) => 'data: ' + JSON.stringify({ choices }) + '\n\n';
+    const parts = [
+      event([{ index: 0, delta: { content: piiToken.slice(0, 9) } }]),
+      event([{ index: 1, delta: { content: secretToken.slice(0, 17) } }]),
+      event([{ index: 2, delta: { content: fabricated + ' / ' + partial }, finish_reason: 'stop' }]),
+      event([{ index: 0, delta: { content: piiToken.slice(9) }, finish_reason: 'stop' }]),
+      event([{ index: 1, delta: { content: secretToken.slice(17) } }]),
+      'data: [DONE]\n\n'
+    ];
+    const source = Buffer.from(parts.join(''));
+    await writeChunks(res, splitBuffer(source, [1, 5, 23, source.length - 3]));
+  };
+
+  let response = await streamRequest({
+    messages: [{ role: 'user', content: resident + ' ' + secret }]
+  });
+  assert.equal(response.status, 200);
+  let events = dataEvents(await response.text());
+  assert.equal(streamedContent(events, 0), resident);
+  assert.equal(streamedContent(events, 1), '[FILTERED]');
+  const untouched = streamedContent(events, 2);
+  assert.match(untouched, /:999999\]\] \/ \[\[LLMWARD:/u);
+  assert.equal(untouched.endsWith(']]'), false);
+
+  response = await streamRequest({
+    messages: [{ role: 'user', content: resident + ' ' + secret }]
+  });
+  assert.equal(response.status, 200);
+  events = dataEvents(await response.text());
+  assert.equal(streamedContent(events, 0), resident);
+  assert.equal(requestNumber, 2);
+});
+
+test('mapping-only malformed and oversized SSE fail closed with one safe log each', async () => {
+  const resident = '000229-3123456';
+  setBuiltInPiiActive();
+  const fixtures = [
+    [Buffer.from('data: {private-invalid-json}\n\n')],
+    [Buffer.alloc(1024 * 1024 + 1, 0x78)]
+  ];
+  for (const chunks of fixtures) {
+    providerHandler = async (req, res, payload) => {
+      assert.equal(payload.messages[0].content.includes(resident), false);
+      await writeChunks(res, chunks);
+    };
+    const response = await streamRequest({
+      messages: [{ role: 'user', content: resident }]
+    });
+    assert.equal(response.status, 502);
+    assert.equal((await response.json()).code, 'filter_processing_failed');
+    assert.deepEqual(requestLogs(), [{
+      status: 'failure', error_type: 'filter', input_tokens: 0, output_tokens: 0, total_tokens: 0
+    }]);
+    assert.equal(db.prepare('SELECT COUNT(*) FROM quota_reservations').pluck().get(), 0);
+    db.prepare('DELETE FROM request_logs').run();
+  }
 });

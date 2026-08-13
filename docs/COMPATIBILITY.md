@@ -28,10 +28,25 @@ Streaming 공급자가 마지막 chunk에 usage를 포함하지 않으면 Gatewa
 
 ## Built-in Korean PII / secret filter compatibility
 
-Resident identifiers use modern date/type validation without legacy checksum,
-including the October 12, 2020 resident random tail change documented by the
-Ministry of the Interior and Safety:
-https://www.mois.go.kr/frt/bbs/type002/commonSelectBoardArticle.do?bbsId=BBSMSTR_000000000205&nttId=75077
-Foreigner identifiers use a separate checksum. Korean phone prefixes, identifiers,
-cards, emails, and distinctive secrets are covered; provider-generated values are
-not output-detected. No-context SSE is byte-transparent; strict context/literal
+This filter covers Korean resident and foreigner registration numbers, payment
+card numbers, Korean phone numbers, email addresses, IPv4 addresses, and
+distinctive secrets such as private-key blocks. Resident identifiers use modern
+date/type validation without a legacy checksum, including the October 12, 2020
+resident random-tail change documented by the Ministry of the Interior and
+Safety: https://www.mois.go.kr/frt/bbs/type002/commonSelectBoardArticle.do?bbsId=BBSMSTR_000000000205&nttId=75077
+Foreigner identifiers use their separate checksum. Supported Korean telephone
+prefixes are `010`, `02`, `031` through `033`, `041` through `044`, `051` through `055`, `061` through `064`,
+and `070`.
+
+It does not detect names, free-form addresses, bank accounts, business
+registration numbers, general URLs, attachments, tool or function arguments,
+or provider-generated raw PII. The filter examines only documented chat text
+fields and is not general DLP.
+
+SSE without an active mapping or literal output filter is byte-transparent.
+With a mapping or literal filter active, SSE is processed strictly by supported
+content field and event boundaries. Invalid JSON data events, an event over
+1 MiB including delimiters, or filtering failures fail closed: before response
+headers the gateway returns HTTP 502 `filter_processing_failed`; after headers
+it stops the upstream request and closes the connection. This keeps the error
+boundary safe without exposing unfiltered content.

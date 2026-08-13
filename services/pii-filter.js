@@ -500,56 +500,73 @@ function scanGoogleApiKeys(text) {
 // 한 글자 짧거나 긴 부분 일치와 토큰 내부 일치는 제외한다.
 
 // 모든 비밀 원문은 복원 맵에 저장하지 않고 요청 전용 토큰만 secretTokens에 기록한다.
-const RULES = [{
+const RULES = [
+// Private-key block: matched PEM/PGP BEGIN/END block is redacted; incomplete or mismatched blocks are excluded.
+{
   id: 'private_key',
   label: 'Private Key Block',
   mode: 'redact',
   scan: scanPrivateKeys
-}, {
+},
+// OpenAI API key: sk- or sk-proj- token with a supported prefix and token boundary is redacted; short examples and other providers are excluded.
+{
   id: 'openai_api_key',
   label: 'OpenAI API Key',
   mode: 'redact',
   scan: scanOpenAiKeys
-}, {
+},
+// Anthropic API key: sufficiently long sk-ant- token is redacted; short or partial tokens are excluded.
+{
   id: 'anthropic_api_key',
   label: 'Anthropic API Key',
   mode: 'redact',
   scan: scanAnthropicKeys
-}, {
+},
+// AWS access key ID: AKIA plus 16 uppercase alphanumerics is redacted; short and token-internal matches are excluded.
+{
   id: 'aws_access_key_id',
   label: 'AWS Access Key ID',
   mode: 'redact',
   scan: scanAwsAccessKeyIds
-}, {
+},
+// GitHub token: recognized gh*/github_pat prefixes and token boundaries are required; short examples are excluded.
+{
   id: 'github_token',
   label: 'GitHub Token',
   mode: 'redact',
   scan: scanGithubTokens
-}, {
+},
+// Slack token: approved xox* prefixes and token boundaries are required; unsupported xox forms are excluded.
+{
   id: 'slack_token',
   label: 'Slack Token',
   mode: 'redact',
   scan: scanSlackTokens
-}, {
+},
+// Slack webhook: only complete hooks.slack.com/services three-segment URLs are redacted; incomplete or other hosts are excluded.
+{
   id: 'slack_webhook',
   label: 'Slack Webhook',
   mode: 'redact',
   scan: scanSlackWebhooks
-}, {
+},
+// Stripe secret or restricted key: sk_/rk_ live or test prefixes and at least 16 token characters are required; public keys and short examples are excluded.
+{
   id: 'stripe_secret_key',
   label: 'Stripe Secret or Restricted Key',
   mode: 'redact',
   scan: scanStripeKeys
-}, {
+},
+// Google API key: AIza plus exactly 35 allowed characters is redacted; partial and token-internal matches are excluded.
+{
   id: 'google_api_key',
   label: 'Google API Key',
   mode: 'redact',
   scan: scanGoogleApiKeys
 },
-
-// ?쒓뎅 二쇰??깅줉踰덊샇: YYMMDD ??二쇰? 援щ텇 ?レ옄(0~4, 9)? ?꾩쓽 6?먮━瑜?蹂댄샇?쒕떎.
-// ?섏씠?덉? ?앸뀈?붿씪 ????媛쒕쭔 ?덉슜?섍퀬 ?ㅼ젣 ?좎쭨? ?レ옄 寃쎄퀎瑜?寃利앺븳??
-// 2020-10-12 ?댄썑 ??6?먮━???꾩쓽媛믪씠誘濡?援ы삎 泥댄겕?ъ? ?붽뎄?섏? ?딅뒗??
+// 주민등록번호: YYMMDD와 구분 숫자 0~4·9를 보호하며 하이픈은 선택이다.
+// 실제 날짜와 숫자 경계를 검증하고, 2020-10-12 이후 임의 뒷자리는 구형 체크섬으로 제외하지 않는다.
+// 외국인등록번호, 짧은 값, 숫자열 내부 일치는 제외한다.
 {
   id: 'kr_resident_registration_number',
   label: 'Korean Resident Registration Number',
@@ -557,10 +574,9 @@ const RULES = [{
   scan: scanKoreanIdentifiers,
   validate: validateResident
 },
-
-// ?멸뎅?몃벑濡앸쾲?? YYMMDD ???멸뎅??援щ텇 ?レ옄(5~8)? ?섎㉧吏 ?レ옄瑜?蹂댄샇?쒕떎.
-// ?섏씠???좊Т, ?ㅼ젣 ?좎쭨, ?レ옄 寃쎄퀎? ?멸뎅?몃벑濡앸쾲??泥댄겕?ъ쓣 寃利앺븳??
-// 二쇰??깅줉踰덊샇 泥댄겕?ш낵 ?명꽣?룹뿉??蹂듭궗??以묎컙 ?レ옄 吏앹닔 議곌굔? ?ъ슜?섏? ?딅뒗??
+// 외국인등록번호: YYMMDD와 구분 숫자 5~8을 보호하며 하이픈은 선택이다.
+// 실제 날짜, 숫자 경계, 외국인등록번호 체크섬을 검증한다.
+// 주민등록번호, 짧은 값, 숫자열 내부 일치는 제외한다.
 {
   id: 'kr_foreigner_registration_number',
   label: 'Korean Foreigner Registration Number',
@@ -568,9 +584,9 @@ const RULES = [{
   scan: scanKoreanIdentifiers,
   validate: validateForeigner
 },
-
-// 寃곗젣 移대뱶踰덊샇: 13~19?먮━ ?レ옄? ?쇨???怨듬갚 ?먮뒗 ?섏씠??援щ텇 ?뺤떇??蹂댄샇?쒕떎.
-// ?レ옄 寃쎄퀎? Luhn 泥댄겕?ъ쓣 寃利앺븯怨??쇳빀 援щ텇?먯? ?섎せ??泥댄겕?ъ? ?쒖쇅?쒕떎.
+// 결제 카드번호: 13~19자리 숫자와 공백 또는 하이픈 구분 형식을 보호한다.
+// 숫자 경계와 Luhn 체크섬을 검증한다.
+// 잘못된 체크섬, 부분 일치, 숫자열 내부 값은 제외한다.
 {
   id: 'payment_card_number',
   label: 'Payment Card Number',
@@ -578,18 +594,18 @@ const RULES = [{
   scan: scanCards,
   validate: validateCard
 },
-
-// ?쒓뎅 ?꾪솕踰덊샇: 010, 02, ?좏슚 吏??쾲?몄? 070 踰덊샇瑜??곗냽/怨듬갚/?섏씠???뺤떇?쇰줈 蹂댄샇?쒕떎.
-// 洹몃９ 湲몄씠? ?쇨???援щ텇?먮? 寃利앺븯怨?援ы삎 ?대룞?꾪솕, 050x, 080, ??쒕쾲?몃뒗 ?쒖쇅?쒕떎.
+// 한국 전화번호: 010·02·031~033·041~044·051~055·061~064·070 접두사와 연속·공백·하이픈 형식을 보호한다.
+// 그룹 길이와 숫자 경계를 검증한다.
+// 050x, 080, 국제번호, 잘못된 구분 형식은 제외한다.
 {
   id: 'kr_phone_number',
   label: 'Korean Phone Number',
   mode: 'restore',
   scan: scanPhones
 },
-
-// ?대찓??二쇱냼: 蹂댁닔?곸씤 ASCII 濡쒖뺄?뚰듃? ?먯씠 ?ы븿???꾨찓???뺤떇??蹂댄샇?쒕떎.
-// 濡쒖뺄?뚰듃/?꾨찓??湲몄씠? ?먃룻븯?댄뵂 寃쎄퀎瑜?寃利앺븯怨??꾩껜 RFC 援щЦ怨?URL? 吏?먰븯吏 ?딅뒗??
+// 이메일 주소: ASCII 로컬파트와 점을 포함한 도메인 형식을 보호한다.
+// 로컬파트·도메인 길이, 점·하이픈 경계, 도메인 레이블을 검증한다.
+// 전체 RFC 문법, URL, 잘못된 도메인과 부분 일치는 제외한다.
 {
   id: 'email_address',
   label: 'Email Address',
@@ -597,9 +613,9 @@ const RULES = [{
   scan: scanEmails,
   validate: validateEmail
 },
-
-// IPv4 二쇱냼: ?먯쑝濡?援щ텇???뺥솗????媛쒖쓽 10吏꾩닔 ?ν뀩??蹂댄샇?쒕떎.
-// 媛??ν뀩 0~255? ?レ옄쨌??寃쎄퀎瑜?寃利앺븯怨?URL ?대? 二쇱냼? ?몄뒪?몃챸? ?쒖쇅?쒕떎.
+// IPv4 주소: 점으로 구분된 네 개의 10진수 옥텟을 보호한다.
+// 각 옥텟 0~255와 숫자 경계를 검증한다.
+// URL 호스트, 도메인명, 범위를 벗어난 값과 부분 일치는 제외한다.
 {
   id: 'ipv4_address',
   label: 'IPv4 Address',
