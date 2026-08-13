@@ -95,7 +95,9 @@ function usageFromProvider(body) {
 router.post('/chat/completions', validateToken, validateModelAccess, async (req, res, next) => {
   let reservation;
   let releaseLimit;
-  let timeout;
+  let providerTimeout;
+  let streamIdleTimeout;
+  let streamMaxDurationTimeout;
   let clientDisconnected = false;
   let requestFinalized = false;
   const startedAt = Date.now();
@@ -105,6 +107,11 @@ router.post('/chat/completions', validateToken, validateModelAccess, async (req,
     if (controller.signal.aborted) return;
     abortCause = cause;
     controller.abort();
+  };
+  const abortForTimeout = () => abortRequest('timeout');
+  const refreshStreamIdleTimeout = () => {
+    clearTimeout(streamIdleTimeout);
+    streamIdleTimeout = setTimeout(abortForTimeout, config.streamIdleTimeoutMs);
   };
   activeRequests.add(abortRequest);
   const disconnect = () => {
@@ -126,7 +133,13 @@ router.post('/chat/completions', validateToken, validateModelAccess, async (req,
     const payload = { ...filteredBody, max_tokens: reservation.maxTokens };
     contentFilters.assertRequestSize(payload);
     const serializedPayload = JSON.stringify(payload);
-    timeout = setTimeout(() => abortRequest('timeout'), config.providerTimeoutMs);
+    providerTimeout = setTimeout(abortForTimeout, config.providerTimeoutMs);
+    if (streaming) {
+      streamMaxDurationTimeout = setTimeout(
+        abortForTimeout,
+        config.streamMaxDurationMs
+      );
+    }
     const response = await fetch(buildProviderEndpoint(req.gatewayModel.base_url, 'chat/completions'), {
       method: 'POST',
       headers: getAuthHeaders(req.gatewayModel),
@@ -134,6 +147,10 @@ router.post('/chat/completions', validateToken, validateModelAccess, async (req,
       signal: controller.signal,
       redirect: 'manual'
     });
+    if (streaming) {
+      clearTimeout(providerTimeout);
+      providerTimeout = undefined;
+    }
     if (response.status >= 300 && response.status < 400) {
       throw new ApiError(502, 'Provider redirect was rejected', 'provider_redirect_rejected');
     }
@@ -143,12 +160,14 @@ router.post('/chat/completions', validateToken, validateModelAccess, async (req,
 
     if (streaming) {
       let streamUsage;
+      refreshStreamIdleTimeout();
       try {
         streamUsage = await relayStream(
           response,
           res,
           controller.signal,
-          filterSnapshot.output_mask_patterns
+          filterSnapshot.output_mask_patterns,
+          refreshStreamIdleTimeout
         );
       } catch (error) {
         if (error.code === 'filter_processing_failed') {
@@ -184,7 +203,8 @@ router.post('/chat/completions', validateToken, validateModelAccess, async (req,
     let body;
     try {
       body = await response.json();
-    } catch {
+    } catch (error) {
+      if (error.name === 'AbortError') throw error;
       throw new ApiError(502, 'Provider returned invalid JSON', 'provider_response_invalid');
     }
     const { inputTokens, outputTokens } = usageFromProvider(body);
@@ -250,7 +270,9 @@ router.post('/chat/completions', validateToken, validateModelAccess, async (req,
     if (!clientDisconnected && !res.headersSent) next(handledError);
     else if (!res.writableEnded) res.destroy();
   } finally {
-    clearTimeout(timeout);
+    clearTimeout(providerTimeout);
+    clearTimeout(streamIdleTimeout);
+    clearTimeout(streamMaxDurationTimeout);
     activeRequests.delete(abortRequest);
     res.off('close', disconnect);
     if (reservation && !requestFinalized) {
@@ -281,9 +303,9 @@ async function writeStreamChunk(response, res, chunk, signal) {
   if (!res.write(chunk)) await once(res, 'drain', { signal });
 }
 
-async function relayStream(response, res, signal, outputPatterns) {
+async function relayStream(response, res, signal, outputPatterns, onChunk) {
   if (outputPatterns.length > 0) {
-    return relayFilteredStream(response, res, signal, outputPatterns);
+    return relayFilteredStream(response, res, signal, outputPatterns, onChunk);
   }
   setStreamHeaders(response, res);
   res.flushHeaders();
@@ -292,6 +314,7 @@ async function relayStream(response, res, signal, outputPatterns) {
   let inputTokens = 0;
   let outputTokens = 0;
   for await (const chunk of response.body) {
+    onChunk();
     const text = decoder.decode(chunk, { stream: true });
     pending += text;
     const lines = pending.split(/\r?\n/);
@@ -552,10 +575,11 @@ async function writeCompleteEvents(response, res, signal, pending, bytes, stream
   }
 }
 
-async function relayFilteredStream(response, res, signal, patterns) {
+async function relayFilteredStream(response, res, signal, patterns, onChunk) {
   const streamState = createMaskState(patterns);
   const pending = createEventAccumulator();
   for await (const chunk of response.body) {
+    onChunk();
     await writeCompleteEvents(response, res, signal, pending, chunk, streamState);
   }
 

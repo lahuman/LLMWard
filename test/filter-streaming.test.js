@@ -16,6 +16,9 @@ process.env.DATABASE_PATH = databasePath;
 process.env.LLMWARD_PROVIDER_TIMEOUT_MS = '3000';
 process.env.LOG_LEVEL = 'silent';
 
+const config = require('../config');
+const { state } = require('../services/limits');
+
 let gatewayServer;
 let providerServer;
 let baseUrl;
@@ -158,6 +161,50 @@ function streamedContent(events, choiceIndex) {
     .filter((choice) => choice.index === choiceIndex && typeof choice.delta?.content === 'string')
     .map((choice) => choice.delta.content)
     .join('');
+}
+
+function delay(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function useStreamingTimeouts(t, values) {
+  const previous = {
+    providerTimeoutMs: config.providerTimeoutMs,
+    streamIdleTimeoutMs: config.streamIdleTimeoutMs,
+    streamMaxDurationMs: config.streamMaxDurationMs
+  };
+  Object.assign(config, values);
+  t.after(() => { Object.assign(config, previous); });
+}
+
+async function writeActiveEvents(res, contents) {
+  res.writeHead(200, { 'Content-Type': 'text/event-stream; charset=utf-8' });
+  res.flushHeaders();
+  for (const content of contents) {
+    await delay(50);
+    res.write(`data: ${JSON.stringify({ choices: [{ index: 0, delta: { content } }] })}\n\n`);
+  }
+  res.write('data: {"choices":[],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}\n\n');
+  res.end('data: [DONE]\n\n');
+}
+
+async function waitForReleasedResources() {
+  await waitFor(
+    () => db.prepare(
+      'SELECT COUNT(*) FROM quota_reservations WHERE user_id = ?'
+    ).pluck().get(user.id) === 0 &&
+      state().users[user.id] === undefined &&
+      state().models['filter-streaming'] === undefined &&
+      state().providers[providerId] === undefined,
+    'stream timeout cleanup did not finish'
+  );
+}
+
+function timeoutFailureLog() {
+  return {
+    status: 'failure', error_type: 'timeout',
+    input_tokens: 0, output_tokens: 0, total_tokens: 0
+  };
 }
 
 before(async () => {
@@ -452,7 +499,6 @@ test('active filtering preserves upstream, quota, and concurrency cleanup on dis
     () => db.prepare('SELECT COUNT(*) FROM quota_reservations WHERE user_id = ?').pluck().get(user.id) === 0,
     'disconnect reservation cleanup did not finish'
   );
-  const { state } = require('../services/limits');
   assert.equal(upstreamClosed, true);
   assert.equal(state().users[user.id], undefined);
   assert.equal(state().models['filter-streaming'], undefined);
@@ -840,4 +886,221 @@ test('max-pattern streaming avoids full-text regular-expression scans', async ()
 
   assert.equal(streamedContent(dataEvents(text), 0), 'visible');
   assert.equal(fullTextMatchers, 0);
+});
+
+test('filtered pre-header idle timeout returns 504 and releases resources', async (t) => {
+  useStreamingTimeouts(t, {
+    providerTimeoutMs: 100,
+    streamIdleTimeoutMs: 200,
+    streamMaxDurationMs: 1000
+  });
+  addOutputFilter(['secret']);
+  providerHandler = async (req, res) => {
+    res.once('close', () => providerEvents.emit('pre-header-idle:closed'));
+    res.writeHead(200, { 'Content-Type': 'text/event-stream; charset=utf-8' });
+    res.flushHeaders();
+    providerEvents.emit('pre-header-idle:started');
+  };
+
+  const started = once(providerEvents, 'pre-header-idle:started', { signal: AbortSignal.timeout(3000) });
+  const closed = once(providerEvents, 'pre-header-idle:closed', { signal: AbortSignal.timeout(3000) });
+  const responsePromise = streamRequest();
+  await started;
+  const response = await responsePromise;
+  await closed;
+
+  assert.equal(response.status, 504);
+  assert.equal((await response.json()).code, 'provider_timeout');
+  await waitForReleasedResources();
+  assert.deepEqual(requestLogs(), [timeoutFailureLog()]);
+});
+
+test('fragmented raw chunks keep a filtered stream alive before an SSE event completes', async (t) => {
+  useStreamingTimeouts(t, {
+    providerTimeoutMs: 100,
+    streamIdleTimeoutMs: 300,
+    streamMaxDurationMs: 2000
+  });
+  addOutputFilter(['secret']);
+  const event = Buffer.from(
+    'data: {"choices":[{"index":0,"delta":{"content":"secret-fragmented"}}]}\n\n'
+  );
+  const chunks = splitBuffer(event, [10, 20, 30, 40]);
+  providerHandler = async (req, res) => {
+    res.writeHead(200, { 'Content-Type': 'text/event-stream; charset=utf-8' });
+    res.flushHeaders();
+    for (let index = 0; index < chunks.length; index += 1) {
+      if (index > 0) await delay(100);
+      res.write(chunks[index]);
+    }
+    res.write('data: {"choices":[],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}\n\n');
+    res.end('data: [DONE]\n\n');
+  };
+
+  const startedAt = Date.now();
+  const response = await streamRequest();
+  assert.equal(response.status, 200);
+  const text = await response.text();
+  const elapsed = Date.now() - startedAt;
+
+  assert.ok(elapsed >= 300, `expected fragmented event to take at least 300 ms, got ${elapsed}`);
+  assert.equal(text.includes('secret'), false);
+  assert.ok(text.includes('[FILTERED]'));
+  assert.ok(text.includes('[DONE]'));
+  assert.deepEqual(requestLogs(), [{
+    status: 'success', error_type: null, input_tokens: 1, output_tokens: 1, total_tokens: 2
+  }]);
+});
+
+test('active transparent stream outlives the response-start timeout', async (t) => {
+  useStreamingTimeouts(t, {
+    providerTimeoutMs: 100,
+    streamIdleTimeoutMs: 300,
+    streamMaxDurationMs: 1000
+  });
+  providerHandler = async (req, res) => writeActiveEvents(
+    res,
+    ['safe-0', 'safe-1', 'safe-2', 'safe-3', 'safe-4']
+  );
+
+  const startedAt = Date.now();
+  const response = await streamRequest();
+  assert.equal(response.status, 200);
+  const text = await response.text();
+  const elapsed = Date.now() - startedAt;
+
+  assert.ok(elapsed >= 200, `expected active stream to outlive 200 ms, got ${elapsed}`);
+  assert.ok(text.includes('[DONE]'));
+  assert.deepEqual(requestLogs(), [{
+    status: 'success', error_type: null, input_tokens: 1, output_tokens: 1, total_tokens: 2
+  }]);
+});
+
+test('post-header idle timeout destroys the connection after relayed bytes', async (t) => {
+  useStreamingTimeouts(t, {
+    providerTimeoutMs: 100,
+    streamIdleTimeoutMs: 200,
+    streamMaxDurationMs: 1000
+  });
+  let upstreamClosed = false;
+  providerHandler = async (req, res) => {
+    res.once('close', () => {
+      upstreamClosed = true;
+      providerEvents.emit('post-header-idle:closed');
+    });
+    res.writeHead(200, { 'Content-Type': 'text/event-stream; charset=utf-8' });
+    res.flushHeaders();
+    res.write('data: {"choices":[{"index":0,"delta":{"content":"safe-partial"}}]}\n\n');
+    providerEvents.emit('post-header-idle:started');
+  };
+
+  const started = once(providerEvents, 'post-header-idle:started', { signal: AbortSignal.timeout(3000) });
+  const closed = once(providerEvents, 'post-header-idle:closed', { signal: AbortSignal.timeout(3000) });
+  const startedAt = Date.now();
+  const responsePromise = streamRequest();
+  await started;
+  const response = await responsePromise;
+  assert.equal(response.status, 200);
+  const partial = await partialBodyUntilFailure(response);
+  const elapsed = Date.now() - startedAt;
+  await closed;
+
+  assert.ok(partial.length > 0);
+  assert.equal(upstreamClosed, true);
+  assert.ok(elapsed >= 150, `expected idle timeout after 150 ms, got ${elapsed}`);
+  assert.ok(elapsed < 700, `expected idle timeout before 700 ms, got ${elapsed}`);
+  await waitForReleasedResources();
+  assert.deepEqual(requestLogs(), [timeoutFailureLog()]);
+});
+
+test('stream maximum duration aborts despite continued progress', async (t) => {
+  useStreamingTimeouts(t, {
+    providerTimeoutMs: 100,
+    streamIdleTimeoutMs: 300,
+    streamMaxDurationMs: 450
+  });
+  let interval;
+  let upstreamClosed = false;
+  providerHandler = async (req, res) => {
+    res.once('close', () => {
+      upstreamClosed = true;
+      clearInterval(interval);
+      providerEvents.emit('maximum-duration:closed');
+    });
+    res.writeHead(200, { 'Content-Type': 'text/event-stream; charset=utf-8' });
+    res.flushHeaders();
+    let sequence = 0;
+    interval = setInterval(() => {
+      res.write(`data: ${JSON.stringify({ choices: [{ index: 0, delta: { content: `safe-${sequence++}` } }] })}\n\n`);
+    }, 50);
+  };
+  t.after(() => { clearInterval(interval); });
+
+  const closed = once(providerEvents, 'maximum-duration:closed', { signal: AbortSignal.timeout(3000) });
+  const startedAt = Date.now();
+  const response = await streamRequest();
+  assert.equal(response.status, 200);
+  const partial = await partialBodyUntilFailure(response);
+  const elapsed = Date.now() - startedAt;
+  await closed;
+
+  assert.ok(partial.length > 0);
+  assert.equal(upstreamClosed, true);
+  assert.ok(elapsed >= 350, `expected hard timeout after 350 ms, got ${elapsed}`);
+  assert.ok(elapsed < 1000, `expected hard timeout before 1000 ms, got ${elapsed}`);
+  await waitForReleasedResources();
+  assert.deepEqual(requestLogs(), [timeoutFailureLog()]);
+});
+
+test('stream idle timeout bounds downstream backpressure', async (t) => {
+  useStreamingTimeouts(t, {
+    providerTimeoutMs: 100,
+    streamIdleTimeoutMs: 200,
+    streamMaxDurationMs: 1000
+  });
+  const originalWrite = http.ServerResponse.prototype.write;
+  const originalOnce = http.ServerResponse.prototype.once;
+  http.ServerResponse.prototype.write = function (...args) {
+    const result = originalWrite.apply(this, args);
+    if (this.getHeader('X-Accel-Buffering') === 'no') return false;
+    return result;
+  };
+  http.ServerResponse.prototype.once = function (eventName, ...args) {
+    if (this.getHeader('X-Accel-Buffering') === 'no' && eventName === 'drain') return this;
+    return originalOnce.call(this, eventName, ...args);
+  };
+  t.after(() => {
+    http.ServerResponse.prototype.write = originalWrite;
+    http.ServerResponse.prototype.once = originalOnce;
+  });
+
+  let interval;
+  let upstreamClosed = false;
+  providerHandler = async (req, res) => {
+    res.once('close', () => {
+      upstreamClosed = true;
+      clearInterval(interval);
+      providerEvents.emit('idle-backpressure:closed');
+    });
+    res.writeHead(200, { 'Content-Type': 'text/event-stream; charset=utf-8' });
+    res.flushHeaders();
+    let sequence = 0;
+    const writeEvent = () => {
+      res.write(`data: ${JSON.stringify({ choices: [{ index: 0, delta: { content: `safe-${sequence++}` } }] })}\n\n`);
+    };
+    writeEvent();
+    interval = setInterval(writeEvent, 25);
+  };
+  t.after(() => { clearInterval(interval); });
+
+  const closed = once(providerEvents, 'idle-backpressure:closed', { signal: AbortSignal.timeout(3000) });
+  const response = await streamRequest();
+  assert.equal(response.status, 200);
+  const partial = await partialBodyUntilFailure(response);
+  await closed;
+
+  assert.ok(partial.length > 0);
+  assert.equal(upstreamClosed, true);
+  await waitForReleasedResources();
+  assert.deepEqual(requestLogs(), [timeoutFailureLog()]);
 });

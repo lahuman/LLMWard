@@ -83,8 +83,8 @@ async function createUser(username, models, inputQuota = 100, outputQuota = 100)
   return { id: response.body.userId, token: response.body.apiToken };
 }
 
-function chat(token, model, maxTokens) {
-  const body = { model, messages: [{ role: 'user', content: 'test' }] };
+function chat(token, model, maxTokens, stream = false) {
+  const body = { model, messages: [{ role: 'user', content: 'test' }], stream };
   if (maxTokens !== undefined) body.max_tokens = maxTokens;
   return request('/v1/chat/completions', {
     method: 'POST', headers: { Authorization: `Bearer ${token}` }, body
@@ -128,6 +128,22 @@ before(async () => {
     let raw = '';
     for await (const chunk of req) raw += chunk;
     const payload = JSON.parse(raw);
+    if (payload.model === 'stream-start-timeout') {
+      res.once('close', () => {
+        providerEvents.emit(`${payload.model}:closed`, !res.writableEnded);
+      });
+      providerEvents.emit(`${payload.model}:started`);
+      return;
+    }
+    if (payload.model === 'nonstream-body-timeout') {
+      res.once('close', () => {
+        providerEvents.emit(`${payload.model}:closed`, !res.writableEnded);
+      });
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.flushHeaders();
+      providerEvents.emit(`${payload.model}:started`);
+      return;
+    }
     receivedPayloads.set(payload.model, payload);
     providerCalls.set(payload.model, (providerCalls.get(payload.model) || 0) + 1);
     const maximums = receivedMaximums.get(payload.model) || [];
@@ -206,7 +222,7 @@ before(async () => {
   });
   assert.equal(provider.status, 201);
   providerId = provider.body.id;
-  for (const [name, maxTokens] of [['standard', 8], ['input-limit', 4], ['output-limit', 2], ['concurrent', 4], ['atomic-fail', 2], ['unpriced', 4], ['inactive-model', 4], ['streaming', 4], ['backpressure', 4], ['abort-in-flight', 4], ['user-concurrency', 4], ['model-concurrency', 4], ['disconnect', 4], ['privacy', 4]]) {
+  for (const [name, maxTokens] of [['standard', 8], ['input-limit', 4], ['output-limit', 2], ['concurrent', 4], ['atomic-fail', 2], ['unpriced', 4], ['inactive-model', 4], ['streaming', 4], ['stream-start-timeout', 4], ['nonstream-body-timeout', 4], ['backpressure', 4], ['abort-in-flight', 4], ['user-concurrency', 4], ['model-concurrency', 4], ['disconnect', 4], ['privacy', 4]]) {
     const model = await admin('/admin/models', {
       method: 'POST', body: { model_name: name, display_name: name, provider_id: providerId, max_tokens: maxTokens }
     });
@@ -1168,6 +1184,51 @@ test('chat reservation lifetime uses the selected request lifetime', async (t) =
 
   await assertReservationLifetime(false, 5000, 'reservation-lifetime-non-streaming');
   await assertReservationLifetime(true, 15000, 'reservation-lifetime-streaming');
+});
+
+async function assertProviderTimeoutLifecycle(t, model, stream) {
+  const providerTimeoutMs = config.providerTimeoutMs;
+  config.providerTimeoutMs = 100;
+  t.after(() => { config.providerTimeoutMs = providerTimeoutMs; });
+
+  const user = await createUser(`${model}-user`, [model]);
+  const started = once(providerEvents, `${model}:started`, { signal: AbortSignal.timeout(3000) });
+  const closed = once(providerEvents, `${model}:closed`, { signal: AbortSignal.timeout(3000) });
+  const responsePromise = chat(user.token, model, 1, stream);
+
+  await started;
+  const [response, [upstreamAborted]] = await Promise.all([responsePromise, closed]);
+  assert.equal(upstreamAborted, true);
+  assert.equal(response.status, 504);
+  assert.equal(response.body.code, 'provider_timeout');
+
+  const reservationCount = () => db.prepare(
+    'SELECT COUNT(*) AS count FROM quota_reservations WHERE user_id = ?'
+  ).get(user.id).count;
+  const { state } = require('../services/limits');
+  await waitFor(
+    () => reservationCount() === 0 &&
+      state().users[user.id] === undefined &&
+      state().models[model] === undefined &&
+      state().providers[providerId] === undefined,
+    `${model} timeout cleanup did not finish`
+  );
+  assert.equal(reservationCount(), 0);
+  assert.deepEqual(db.prepare(`
+    SELECT status, error_type FROM request_logs
+    WHERE user_id = ? ORDER BY id DESC LIMIT 1
+  `).get(user.id), { status: 'failure', error_type: 'timeout' });
+  assert.equal(state().users[user.id], undefined);
+  assert.equal(state().models[model], undefined);
+  assert.equal(state().providers[providerId], undefined);
+}
+
+test('streaming response-start timeout returns 504 before downstream headers', async (t) => {
+  await assertProviderTimeoutLifecycle(t, 'stream-start-timeout', true);
+});
+
+test('non-streaming body timeout covers the complete provider response', async (t) => {
+  await assertProviderTimeoutLifecycle(t, 'nonstream-body-timeout', false);
 });
 
 test('online backup, retention, audit privacy, doctor, and Docker healthcheck are verifiable', async () => {
