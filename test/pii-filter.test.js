@@ -613,7 +613,6 @@ for (const [name, content] of nonMatchMiBCases) {
   });
 }
 
-
 const SECRET_FAMILIES = [
   { name: 'OpenAI project', prefix: 'sk-proj-', minimum: 20, maximum: 256,
     suffix: 'A', invalid: '.', adjacent: 'Z', ruleId: 'openai_api_key' },
@@ -793,6 +792,22 @@ test('private-key missing or mismatched end markers fail closed for LF and CRLF'
   }
 });
 
+
+
+test('private-key lone CR after an end marker fails closed', () => {
+  const encoded = Buffer.from('synthetic fixture only').toString('base64');
+  const content = [
+    '-----BEGIN PRIVATE KEY-----',
+    encoded,
+    '-----END PRIVATE KEY-----'
+  ].join('\n') + '\r';
+  assert.throws(() => applyInputFilter({ messages: [{ content }] }), (error) => {
+    assert.equal(error.status, 500);
+    assert.equal(error.code, 'filter_processing_failed');
+    assert.equal(error.message, 'Content filter processing failed');
+    return true;
+  });
+});
 test('private-key markers must occupy the whole ASCII line', () => {
   const encoded = Buffer.from('synthetic fixture only').toString('base64');
   for (const lineEnding of ['\n', '\r\n']) {
@@ -868,7 +883,6 @@ for (const [name, content] of secretNearMissMiBCases) {
     assert.equal(result.context, null);
   });
 }
-
 
 function outputFixture() {
   const originalPii = 'synthetic.output@example.test';
@@ -1004,6 +1018,15 @@ test('restoration carry preserves multiple, fabricated, prefix-split, and incomp
     'a' + originalPii + 'b[FILTERED]c' + fabricated + 'd' + incomplete);
 });
 
+
+
+test('restoration carry emits impossible placeholder prefixes immediately', () => {
+  const { context } = outputFixture();
+  const value = context.prefix + '!ordinary';
+  const carry = createRestorationCarry(context);
+  assert.equal(carry.push(value), value);
+  assert.equal(carry.flush(), '');
+});
 test('restoration carry keeps at most one bounded token prefix for 1 MiB input', {
   timeout: 5000
 }, () => {

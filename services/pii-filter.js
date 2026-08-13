@@ -313,7 +313,7 @@ function lineAt(text, start) {
   const newline = text.indexOf('\n', start);
   const next = newline < 0 ? text.length : newline + 1;
   let end = newline < 0 ? text.length : newline;
-  if (end > start && text[end - 1] === '\r') end -= 1;
+  if (newline >= 0 && end > start && text[end - 1] === '\r') end -= 1;
   return { line: text.slice(start, end), end, next };
 }
 
@@ -922,6 +922,28 @@ function longestPrefixSuffix(value, prefix) {
   return 0;
 }
 
+
+function canCompletePlaceholder(candidate, context) {
+  const body = candidate.slice(context.prefix.length);
+  if (!body) return true;
+  if (body[0] < 'a' || body[0] > 'z') return false;
+  let cursor = 1;
+  while (cursor < body.length &&
+      (body[cursor] >= 'a' && body[cursor] <= 'z' ||
+       isDigit(body[cursor]) || body[cursor] === '_')) cursor += 1;
+  if (cursor > 64) return false;
+  if (cursor === body.length) return true;
+  if (body[cursor] !== ':') return false;
+  cursor += 1;
+  const counterStart = cursor;
+  while (cursor < body.length && isDigit(body[cursor])) cursor += 1;
+  const counterLength = cursor - counterStart;
+  if (counterLength > 6) return false;
+  if (cursor === body.length) return true;
+  if (body[cursor] !== ']' || counterLength !== 6) return false;
+  return cursor + 1 === body.length;
+}
+
 function processRestorationText(value, context) {
   const output = [];
   let cursor = 0;
@@ -951,7 +973,8 @@ function processRestorationText(value, context) {
       }
       continue;
     }
-    if (bounded.length < MAX_PLACEHOLDER_LENGTH) {
+    if (bounded.length < MAX_PLACEHOLDER_LENGTH &&
+        canCompletePlaceholder(bounded, context)) {
       return { output: output.join(''), carry: value.slice(start) };
     }
     output.push(value[start]);
