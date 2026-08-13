@@ -88,8 +88,8 @@ function assertLegacyUsers() {
     SELECT 1 FROM users
     WHERE username IS NULL OR trim(username) = ''
        OR api_token IS NULL OR api_token = ''
-       OR typeof(max_daily_input_tokens) != 'integer' OR max_daily_input_tokens <= 0
-       OR typeof(max_daily_output_tokens) != 'integer' OR max_daily_output_tokens <= 0
+       OR typeof(max_daily_input_tokens) != 'integer' OR max_daily_input_tokens < 0
+       OR typeof(max_daily_output_tokens) != 'integer' OR max_daily_output_tokens < 0
        OR typeof(max_requests_per_minute) != 'integer' OR max_requests_per_minute <= 0
        OR typeof(max_concurrent_requests) != 'integer' OR max_concurrent_requests <= 0
        OR is_active NOT IN (0, 1)

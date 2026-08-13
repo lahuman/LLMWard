@@ -541,6 +541,38 @@ test('migration is repeatable on an already-current database', () => {
   database.close();
 });
 
+test('current database preserves positive and accepts zero user quotas on repeated migration', () => {
+  const file = databasePath('zero-user-quotas');
+  assertMigrated(migrate(file));
+
+  const current = open(file);
+  const insert = current.prepare(`
+    INSERT INTO users
+      (username, api_token, max_daily_input_tokens, max_daily_output_tokens)
+    VALUES (?, ?, ?, ?)
+  `);
+  insert.run('zero-quota-user', 'zero-quota-token', 0, 0);
+  insert.run('limited-quota-user', 'limited-quota-token', 17, 19);
+  current.close();
+
+  assertMigrated(migrate(file));
+  assertMigrated(migrate(file));
+  const checked = open(file, { readonly: true });
+  assert.deepEqual(checked.prepare(`
+    SELECT username, max_daily_input_tokens, max_daily_output_tokens
+    FROM users WHERE username IN (?, ?) ORDER BY username
+  `).all('zero-quota-user', 'limited-quota-user'), [
+    {
+      username: 'limited-quota-user',
+      max_daily_input_tokens: 17,
+      max_daily_output_tokens: 19
+    },
+    { username: 'zero-quota-user', max_daily_input_tokens: 0, max_daily_output_tokens: 0 }
+  ]);
+  assert.equal(checked.pragma('user_version', { simple: true }), 3);
+  checked.close();
+});
+
 test('post-migration integrity failure rolls back changes', () => {
   const file = databasePath('post-integrity-failure');
   const result = migrate(file, { failPostIntegrityCheck: true });

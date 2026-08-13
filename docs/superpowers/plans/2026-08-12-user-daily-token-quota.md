@@ -30,7 +30,7 @@
 - `test/migrations.test.js`: cover repeated startup migration with a current database containing zero quotas.
 - `public/admin-dashboard.html`: default both quota inputs to 0 and explain the sentinel in accessible labels.
 - `public/admin-dashboard.js`: label zero quotas as `Unlimited` and clarify edit prompts.
-- `test/admin-dashboard.test.js`: statically verify the form defaults, copy, and safe rendering helper.
+- `test/admin-dashboard.test.js`: verify rendered unlimited labels and edit-prompt guidance through the existing dashboard harness.
 - `docs/API.md`: document the quota contract and the existing post-response input-accounting limitation.
 
 ---
@@ -51,10 +51,10 @@
 
 - [ ] **Step 1: Add failing admin and runtime regression tests**
 
-Add the first two tests below to `test/gateway.test.js` after `user creation authenticates and user lists never disclose tokens`. Add `zero input and output quotas are enforced independently` immediately after the existing `output quota is enforced` test so its `input-limit` and `output-limit` provider calls do not change the existing exact call-count assertions:
+Add the first five tests below to `test/gateway.test.js` after `user creation authenticates and user lists never disclose tokens`. Add the final two mixed-quota tests immediately after the existing `output quota is enforced` test so their `input-limit` and `output-limit` provider calls do not change the existing exact call-count assertions:
 
 ```js
-test('new users default to unlimited token quotas and zero quota updates are accepted', async () => {
+test('new users default both daily token quotas to unlimited', async () => {
   const created = await admin('/admin/users', {
     method: 'POST', body: { username: 'default-unlimited-user', allowed_models: ['standard'] }
   });
@@ -64,6 +64,9 @@ test('new users default to unlimited token quotas and zero quota updates are acc
     input: defaultUser.max_daily_input_tokens,
     output: defaultUser.max_daily_output_tokens
   }, { input: 0, output: 0 });
+});
+
+test('user quota updates accept zero', async () => {
 
   const limited = await createUser('zero-update-user', ['standard'], 5, 6);
   const updated = await admin(`/admin/users/${limited.id}`, {
@@ -74,30 +77,40 @@ test('new users default to unlimited token quotas and zero quota updates are acc
   assert.equal(updated.body.max_daily_output_tokens, 0);
 });
 
-test('zero token quotas are unlimited and preserve request and model output limits', async () => {
-  const created = await admin('/admin/users', {
-    method: 'POST', body: { username: 'unlimited-runtime-user', allowed_models: ['standard'] }
-  });
-  assert.equal(created.status, 201);
+test('zero daily quotas allow repeated requests', async () => {
+  const user = await createUser('unlimited-runtime-user', ['standard'], 0, 0);
+
+  assert.equal((await chat(user.token, 'standard', 1)).status, 200);
+  assert.equal((await chat(user.token, 'standard', 1)).status, 200);
+});
+
+test('zero output quota preserves request and model output limits', async () => {
+  const user = await createUser('unlimited-maximum-user', ['standard'], 0, 0);
   const before = (receivedMaximums.get('standard') || []).length;
 
-  assert.equal((await chat(created.body.apiToken, 'standard', 999999)).status, 200);
-  assert.equal((await chat(created.body.apiToken, 'standard', 2)).status, 200);
+  assert.equal((await chat(user.token, 'standard', 999999)).status, 200);
+  assert.equal((await chat(user.token, 'standard', 2)).status, 200);
   assert.deepEqual(receivedMaximums.get('standard').slice(before), [8, 2]);
+});
+
+test('usage reports null remaining tokens for unlimited quotas', async () => {
+  const user = await createUser('unlimited-usage-user', ['standard'], 0, 0);
 
   const usage = await request('/dashboard/usage', {
-    headers: { Authorization: `Bearer ${created.body.apiToken}` }
+    headers: { Authorization: `Bearer ${user.token}` }
   });
   assert.equal(usage.status, 200);
   assert.equal(usage.body.remainingInput, null);
   assert.equal(usage.body.remainingOutput, null);
 });
 
-test('zero input and output quotas are enforced independently', async () => {
+test('zero input quota leaves a positive output quota enforced', async () => {
   const outputLimited = await createUser('unlimited-input-user', ['output-limit'], 0, 2);
   assert.equal((await chat(outputLimited.token, 'output-limit', 2)).status, 200);
   assert.equal((await chat(outputLimited.token, 'output-limit', 1)).status, 429);
+});
 
+test('zero output quota leaves a positive input quota enforced', async () => {
   const inputLimited = await createUser('unlimited-output-user', ['input-limit'], 2, 0);
   assert.equal((await chat(inputLimited.token, 'input-limit', 1)).status, 200);
   assert.equal((await chat(inputLimited.token, 'input-limit', 1)).status, 429);
@@ -156,7 +169,7 @@ test('current database preserves positive and accepts zero user quotas on repeat
 Run:
 
 ```powershell
-node --test --test-name-pattern="new users default|zero token quotas|zero input and output quotas|admin input validation" test/gateway.test.js
+node --test --test-name-pattern="new users default|user quota updates|zero daily quotas|zero output quota|usage reports null|zero input quota|positive input quota|admin input validation" test/gateway.test.js
 node --test --test-name-pattern="zero user quotas" test/migrations.test.js
 ```
 
@@ -256,7 +269,7 @@ In `routes/v1.js`, make unlimited remaining values explicit without changing pos
 Run:
 
 ```powershell
-node --test --test-name-pattern="new users default|zero token quotas|zero input and output quotas|admin input validation" test/gateway.test.js
+node --test --test-name-pattern="new users default|user quota updates|zero daily quotas|zero output quota|usage reports null|zero input quota|positive input quota|admin input validation" test/gateway.test.js
 node --test --test-name-pattern="zero user quotas" test/migrations.test.js
 ```
 
@@ -287,6 +300,7 @@ git commit -m "feat: support unlimited user token quotas"
 
 **Files:**
 - Modify: `test/admin-dashboard.test.js:155-162`
+- Modify: `test/gateway.test.js:246-280`
 - Modify: `public/admin-dashboard.html:23`
 - Modify: `public/admin-dashboard.js:2,13-18`
 - Modify: `docs/API.md:13-17`
@@ -295,33 +309,24 @@ git commit -m "feat: support unlimited user token quotas"
 - Consumes: admin user responses where both quota properties are non-negative integers and configured zero means unlimited.
 - Produces: create-form values `0`, visible `Unlimited` cells for zero quotas, edit guidance that accepts zero, and API documentation for defaults, independent enforcement, and `null` remaining values.
 
-- [ ] **Step 1: Add the failing static dashboard regression test**
+- [ ] **Step 1: Add failing dashboard behavior regression tests**
 
-Add this test to `test/admin-dashboard.test.js` before the async provider-form tests:
+Extend `createDashboardHarness` to return the fake window and `#users-content`, then add small recursive test helpers that collect rendered text and find a button.
 
-```js
-test('dashboard defaults zero quotas and labels them as unlimited', () => {
-  const html = fs.readFileSync(path.join(__dirname, '..', 'public', 'admin-dashboard.html'), 'utf8');
-  const script = fs.readFileSync(path.join(__dirname, '..', 'public', 'admin-dashboard.js'), 'utf8');
+Add an async `dashboard renders zero quotas as unlimited and explains zero while editing` test. Return one zero-quota user from `/admin/users`, assert the rendered table contains exactly two `Unlimited` values, click `Edit`, and assert both prompt labels say `(0 = unlimited)` with initial value `0`.
 
-  assert.match(html, /Daily input quota \(0 = unlimited\) <input name="inputQuota" type="number" min="0" value="0" required>/);
-  assert.match(html, /Daily output quota \(0 = unlimited\) <input name="outputQuota" type="number" min="0" value="0" required>/);
-  assert.match(script, /promptInput:'Daily input quota \(0 = unlimited\)'/);
-  assert.match(script, /promptOutput:'Daily output quota \(0 = unlimited\)'/);
-  assert.match(script, /function quota\(value\)\{return value===0\?'Unlimited':number\(value\)\}/);
-  assert.match(script, /quota\(user\.max_daily_input_tokens\),quota\(user\.max_daily_output_tokens\)/);
-});
-```
+Add an `admin dashboard serves zero quota form defaults` HTTP-boundary test to `test/gateway.test.js` after the security-header test. Fetch `/admin/` and assert both named quota inputs have `min="0"` and `value="0"`, with visible `(0 = unlimited)` labels.
 
-- [ ] **Step 2: Run the focused dashboard test and verify RED**
+- [ ] **Step 2: Run the focused dashboard tests and verify RED**
 
 Run:
 
 ```powershell
-node --test --test-name-pattern="dashboard defaults zero quotas" test/admin-dashboard.test.js
+node --test --test-name-pattern="dashboard renders zero quotas" test/admin-dashboard.test.js
+node --test --test-name-pattern="admin dashboard serves zero quota form defaults" test/gateway.test.js
 ```
 
-Expected: FAIL because the form still uses minimum 1 and 100000/50000 defaults and the script has no unlimited formatter.
+Expected: both commands fail because the form still uses minimum 1 and 100000/50000 defaults, rendered zero values are `0`, and edit prompts do not explain the sentinel.
 
 - [ ] **Step 3: Update the form, prompts, and quota rendering**
 
@@ -365,15 +370,16 @@ Add this section in `docs/API.md` after the token-management paragraph:
 `GET /dashboard/usage`의 `remainingInput`과 `remainingOutput`은 양수 한도에서는 남은 토큰 수를 반환합니다. 해당 방향이 무제한이면 `null`, 양수 한도를 소진했으면 0입니다.
 ```
 
-- [ ] **Step 5: Run the focused dashboard test and verify GREEN**
+- [ ] **Step 5: Run the focused dashboard tests and verify GREEN**
 
 Run:
 
 ```powershell
-node --test --test-name-pattern="dashboard defaults zero quotas" test/admin-dashboard.test.js
+node --test --test-name-pattern="dashboard renders zero quotas" test/admin-dashboard.test.js
+node --test --test-name-pattern="admin dashboard serves zero quota form defaults" test/gateway.test.js
 ```
 
-Expected: PASS with no unsafe DOM sink introduced.
+Expected: both commands pass with no unsafe DOM sink introduced.
 
 - [ ] **Step 6: Run the complete regression suite**
 
@@ -393,7 +399,7 @@ Run:
 git diff --check
 git status --short
 git diff -- routes/admin.js db/migrations.js services/usage.js routes/v1.js public/admin-dashboard.html public/admin-dashboard.js docs/API.md test/gateway.test.js test/migrations.test.js test/admin-dashboard.test.js
-git add -- public/admin-dashboard.html public/admin-dashboard.js docs/API.md test/admin-dashboard.test.js
+git add -- public/admin-dashboard.html public/admin-dashboard.js docs/API.md test/admin-dashboard.test.js test/gateway.test.js
 git commit -m "feat: show unlimited user token quotas"
 git status --short
 ```

@@ -153,7 +153,28 @@ function createDashboardHarness({ storedKey = '', fetchOverride } = {}) {
   context.window.confirm = () => false;
   context.window.addEventListener = () => {};
   vm.runInNewContext(fs.readFileSync(path.join(__dirname, '..', 'public', 'admin-dashboard.js'), 'utf8'), context);
-  return { adminKey: document.getElementById('admin-key'), loginForm, providerForm, requests, status: document.getElementById('status') };
+  return {
+    adminKey: document.getElementById('admin-key'),
+    loginForm,
+    providerForm,
+    requests,
+    status: document.getElementById('status'),
+    usersContent: document.getElementById('users-content'),
+    window: context.window,
+  };
+}
+
+function collectText(node) {
+  return [node.textContent, ...node.children.flatMap(collectText)].filter(Boolean);
+}
+
+function findButton(node, label) {
+  if (node.type === 'button' && node.textContent === label) return node;
+  for (const child of node.children) {
+    const match = findButton(child, label);
+    if (match) return match;
+  }
+  return null;
 }
 
 async function settle() {
@@ -236,4 +257,53 @@ test('stored-key initial loading preserves a statistics error after delayed conf
   assert.equal(statisticsStarted, true);
   assert.equal(status.textContent, 'Statistics failed.');
   assert.equal(status.className, 'status error');
+});
+
+test('dashboard renders zero quotas as unlimited and explains zero while editing', async () => {
+  const user = {
+    id: 1,
+    username: 'unlimited-user',
+    is_active: true,
+    max_daily_input_tokens: 0,
+    max_daily_output_tokens: 0,
+    permissions_valid: true,
+    allowed_models: [],
+    created_at: '2026-08-12T00:00:00.000Z',
+  };
+  const positiveQuotaUser = {
+    id: 2,
+    username: 'limited-user',
+    is_active: true,
+    max_daily_input_tokens: 1234567,
+    max_daily_output_tokens: 7654321,
+    permissions_valid: true,
+    allowed_models: [],
+    created_at: '2026-08-12T00:00:00.000Z',
+  };
+  const harness = createDashboardHarness({
+    storedKey: 'stored-admin-key',
+    fetchOverride(route) {
+      if (route === '/admin/users') return response([user, positiveQuotaUser]);
+      return undefined;
+    },
+  });
+  const prompts = [];
+  harness.window.prompt = (label, initialValue) => {
+    prompts.push([label, initialValue]);
+    return prompts.length === 1 ? initialValue : null;
+  };
+  await settle();
+
+  const renderedText = collectText(harness.usersContent);
+  assert.equal(renderedText.filter((text) => text === 'Unlimited').length, 2);
+  assert.ok(renderedText.includes(new Intl.NumberFormat().format(1234567)));
+  assert.ok(renderedText.includes(new Intl.NumberFormat().format(7654321)));
+  const edit = findButton(harness.usersContent, 'Edit');
+  assert.ok(edit);
+  edit.dispatchEvent(new Event('click'));
+
+  assert.deepEqual(prompts, [
+    ['Daily input quota (0 = unlimited)', '0'],
+    ['Daily output quota (0 = unlimited)', '0'],
+  ]);
 });

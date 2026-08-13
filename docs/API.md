@@ -14,6 +14,14 @@ curl -N http://localhost:3000/v1/chat/completions \
 
 토큰 관리: `GET/POST /admin/users/:id/tokens`, `DELETE /admin/users/:userId/tokens/:tokenId`, `POST /admin/users/:id/rotate-token`.
 
+## 사용자 일일 토큰 한도
+
+`max_daily_input_tokens`와 `max_daily_output_tokens`는 서로 독립적인 0 이상의 safe integer입니다. 사용자 생성 시 필드를 생략하면 각각 0으로 저장되며, 0은 해당 방향의 일일 토큰 한도가 무제한임을 뜻합니다. 양수는 해당 방향의 일일 토큰 한도이고, 기존 사용자의 저장값은 자동으로 변경되지 않습니다.
+
+출력은 일일 출력 토큰 한도가 0이어도 요청의 `max_tokens`와 모델의 최대 출력 토큰 안에서 예약되므로 요청 및 모델 최대치는 계속 적용됩니다. 입력 사용량은 공급자 응답 후 실제 사용량으로 확정됩니다. 따라서 양수 입력 토큰 한도를 넘기는 요청은 완료될 수 있으며, 한도를 넘은 뒤의 후속 요청부터 HTTP 429를 받습니다.
+
+`GET /dashboard/usage`의 `remainingInput`과 `remainingOutput`은 각 방향의 남은 일일 토큰 수를 반환합니다. 해당 방향의 일일 토큰 한도가 무제한이면 `null`, 양수 한도를 소진했으면 숫자 `0`입니다.
+
 공급자 모델 검색: `GET /admin/providers/:id/discover-models`. 검색은 읽기 전용이며 등록은 `POST /admin/models`로 명시적으로 수행합니다.
 
 제한 초과는 HTTP 429, 안정적인 `code`, 가능한 경우 `Retry-After`를 반환합니다.

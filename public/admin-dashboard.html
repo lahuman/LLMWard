@@ -20,7 +20,7 @@
       </nav>
       <section id="onboarding" class="card hidden"><h2>First-time setup</h2><div id="onboarding-content"></div></section>
       <section id="tab-users">
-        <div class="card"><h2>Create user</h2><form id="user-form"><div class="grid"><label>Username <input name="username" required maxlength="200"></label><label>Daily input quota <input name="inputQuota" type="number" min="1" value="100000" required></label><label>Daily output quota <input name="outputQuota" type="number" min="1" value="50000" required></label><label>Allowed models (comma-separated; blank means all) <input name="allowedModels"></label></div><div><button type="submit">Create user</button></div></form><div id="new-token" class="hidden"><p>This token is shown once. Store it securely.</p><pre id="new-token-value"></pre></div></div>
+        <div class="card"><h2>Create user</h2><form id="user-form"><div class="grid"><label>Username <input name="username" required maxlength="200"></label><label>Daily input quota (0 = unlimited) <input name="inputQuota" type="number" min="0" value="0" required></label><label>Daily output quota (0 = unlimited) <input name="outputQuota" type="number" min="0" value="0" required></label><label>Allowed models (comma-separated; blank means all) <input name="allowedModels"></label></div><div><button type="submit">Create user</button></div></form><div id="new-token" class="hidden"><p>This token is shown once. Store it securely.</p><pre id="new-token-value"></pre></div></div>
         <div class="card"><h2>Users</h2><div id="users-content"></div></div>
       </section>
       <section id="tab-models" class="hidden">
