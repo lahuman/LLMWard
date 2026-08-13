@@ -387,6 +387,13 @@ function findButton(node, label) {
   return null;
 }
 
+function findButtons(node, label) {
+  const matches = [];
+  if (node.type === 'button' && node.textContent === label) matches.push(node);
+  for (const child of node.children) matches.push(...findButtons(child, label));
+  return matches;
+}
+
 async function settle() {
   await new Promise((resolve) => setImmediate(resolve));
   await new Promise((resolve) => setImmediate(resolve));
@@ -1371,4 +1378,96 @@ test('model delete guards keep the confirmation open with the server error', asy
   assert.equal(harness.confirmDialogStatus.children.length, 0);
   assert.equal(harness.modelsContent.children[0], originalTable);
   assert.equal(harness.confirmCount, 0);
+});
+
+test('stale discovery response cannot overwrite a normal model create dialog', async () => {
+  const delayed = deferred();
+  const harness = createDashboardHarness({ storedKey: 'stored-admin-key', fetchOverride(route) {
+    if (route === '/admin/providers') return response([dashboardProvider()]);
+    if (route === '/admin/providers/7/discover-models') return delayed.promise;
+    return undefined;
+  }});
+  await settle();
+  findButton(harness.providersContent, 'Discover models').dispatchEvent(new Event('click'));
+  await settle();
+  harness.createModel.dispatchEvent(new Event('click'));
+  harness.modelForm.elements.modelName.value = 'normal-model';
+  harness.modelForm.elements.displayName.value = 'Normal Model';
+  harness.modelForm.elements.providerId.value = '19';
+  const openCount = harness.modelDialog.showModalCount;
+  delayed.resolve(response([{ model_name: 'stale-a' }]));
+  await settle();
+  assert.equal(harness.modelDialog.showModalCount, openCount);
+  assert.equal(harness.modelForm.elements.modelName.value, 'normal-model');
+  assert.equal(harness.modelForm.elements.displayName.value, 'Normal Model');
+  assert.equal(harness.modelForm.elements.providerId.value, '19');
+  assert.equal(harness.modelForm.elements.providerId.disabled, false);
+  assert.equal(harness.modelDiscoveryList.children.length, 0);
+});
+
+test('out-of-order model discovery applies only the latest provider response', async () => {
+  const delayedA = deferred(), delayedB = deferred();
+  const providerA = dashboardProvider(), providerB = dashboardProvider({ id: 8, provider_name: 'provider-b', display_name: 'Provider B' });
+  const harness = createDashboardHarness({ storedKey: 'stored-admin-key', fetchOverride(route) {
+    if (route === '/admin/providers') return response([providerA, providerB]);
+    if (route === '/admin/providers/7/discover-models') return delayedA.promise;
+    if (route === '/admin/providers/8/discover-models') return delayedB.promise;
+    return undefined;
+  }});
+  await settle();
+  const triggers = findButtons(harness.providersContent, 'Discover models');
+  triggers[0].dispatchEvent(new Event('click'));
+  triggers[1].dispatchEvent(new Event('click'));
+  await settle();
+  delayedB.resolve(response([{ model_name: 'provider-b-model' }]));
+  await settle();
+  const openCount = harness.modelDialog.showModalCount;
+  delayedA.resolve(response([{ model_name: 'stale-a' }]));
+  await settle();
+  assert.equal(harness.modelDialog.showModalCount, openCount);
+  assert.equal(harness.modelForm.elements.providerId.value, '8');
+  assert.equal(harness.modelForm.elements.providerId.disabled, true);
+  assert.equal(harness.modelForm.elements.modelName.value, 'provider-b-model');
+  assert.deepEqual(harness.modelDiscoveryList.children.map((item) => item.textContent), ['provider-b-model']);
+});
+
+test('model discovery cancel and success restore the logical Discover models trigger', async () => {
+  const provider = dashboardProvider();
+  const cancelHarness = createDashboardHarness({ storedKey: 'stored-admin-key', fetchOverride(route) {
+    if (route === '/admin/providers') return response([provider]);
+    if (route === '/admin/providers/7/discover-models') return response([{ model_name: 'cancel-model' }]);
+    return undefined;
+  }});
+  await settle();
+  const cancelTrigger = findButton(cancelHarness.providersContent, 'Discover models');
+  cancelTrigger.dispatchEvent(new Event('click'));
+  await settle();
+  cancelHarness.modelCancel.dispatchEvent(new Event('click'));
+  assert.equal(cancelTrigger.focusCount, 1);
+  assert.equal(cancelHarness.createModel.focusCount, 0);
+
+  const successHarness = createDashboardHarness({ storedKey: 'stored-admin-key', fetchOverride(route, options) {
+    if (route === '/admin/providers') return response([provider]);
+    if (route === '/admin/providers/7/discover-models') return response([{ model_name: 'registered-model' }]);
+    if (route === '/admin/models' && options.method === 'POST') return response(dashboardModel({ model_name: 'registered-model' }));
+    return undefined;
+  }});
+  await settle();
+  const oldTrigger = findButton(successHarness.providersContent, 'Discover models');
+  oldTrigger.dispatchEvent(new Event('click'));
+  await settle();
+  successHarness.modelForm.dispatchEvent(new Event('submit', { cancelable: true }));
+  await settle();
+  const newTrigger = findButton(successHarness.providersContent, 'Discover models');
+  assert.notEqual(newTrigger, oldTrigger);
+  assert.equal(oldTrigger.focusCount, 0);
+  assert.equal(newTrigger.focusCount, 1);
+  assert.equal(successHarness.createModel.focusCount, 0);
+});
+
+test('model identifier is programmatically associated with discovery constraints', () => {
+  const html = fs.readFileSync(path.join(__dirname, '..', 'public', 'admin-dashboard.html'), 'utf8');
+  assert.match(html, /<input name="modelName"[^>]*aria-describedby="model-discovery-help"[^>]*aria-controls="model-discovery-list"/u);
+  assert.match(html, /id="model-discovery-help"[^>]*>[^<]*Choose one of the discovered identifiers/u);
+  assert.match(html, /<ul id="model-discovery-list"/u);
 });

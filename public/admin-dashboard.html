@@ -105,7 +105,7 @@
       <form id="model-form">
         <input name="modelId" type="hidden">
         <div class="grid">
-          <label>Identifier <input name="modelName" required></label>
+          <label>Identifier <input name="modelName" required aria-describedby="model-discovery-help" aria-controls="model-discovery-list"></label>
           <label>Display name <input name="displayName" required></label>
           <label>Provider <select name="providerId" required></select></label>
           <label>Maximum output tokens <input name="maxTokens" type="number" min="1" max="9007199254740991" step="1" value="4096" required></label>
@@ -128,6 +128,7 @@
         <section id="model-discovery" class="hidden" aria-labelledby="model-discovery-title">
           <h3 id="model-discovery-title">Discovered model identifiers</h3>
           <ul id="model-discovery-list"></ul>
+          <p id="model-discovery-help" class="help">Choose one of the discovered identifiers shown below when registering from discovery.</p>
         </section>
         <div id="model-dialog-status" class="status hidden" role="status" aria-live="polite"></div>
         <div class="dialog-actions"><button id="model-submit" type="submit">Create model</button><button id="model-cancel" type="button" class="secondary">Cancel</button></div>
