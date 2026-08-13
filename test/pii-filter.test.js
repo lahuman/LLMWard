@@ -343,6 +343,29 @@ test('card, phone, email, and IPv4 reject invalid checks, layouts, boundaries, U
   for (const value of rejected) assertRejected(value);
 });
 
+
+test('IPv4 URL contexts exclude query, path, and protocol-relative addresses', () => {
+  for (const value of [
+    'https://example.test/?ip=192.0.2.1',
+    'https://example.test/path/192.0.2.1',
+    '//example.test/path?ip=192.0.2.1'
+  ]) {
+    assertRejected(value);
+  }
+
+  const plain = applyInputFilter({ messages: [{ content: 'ip=192.0.2.1' }] });
+  assert.notEqual(plain.context, null);
+  assert.match(plain.body.messages[0].content,
+    /^ip=\[\[LLMWARD:[0-9a-f]{32}:ipv4_address:\d{6}\]\]$/u);
+
+  const beforeUrl = applyInputFilter({
+    messages: [{ content: '192.0.2.1,https://example.test/?ip=198.51.100.2' }]
+  });
+  assert.notEqual(beforeUrl.context, null);
+  assert.match(beforeUrl.body.messages[0].content,
+    /^\[\[LLMWARD:[0-9a-f]{32}:ipv4_address:\d{6}\]\],https:\/\/example\.test\/\?ip=198\.51\.100\.2$/u);
+});
+
 test('ordered spans preserve text order, skip rejected candidates, and honor earlier overlap claims', () => {
   const invalidCard = '4242 4242 4242 4243';
   const mixed = [

@@ -251,11 +251,30 @@ function validateEmail(value) {
   return true;
 }
 
+function findUrlStart(value) {
+  for (let index = 0; index < value.length - 1; index += 1) {
+    if (value[index] !== '/' || value[index + 1] !== '/') continue;
+    if (index === 0 || value[index - 1] === ':' ||
+        '=([{<\"\''.includes(value[index - 1])) {
+      return index;
+    }
+  }
+  return -1;
+}
+
 function scanIpv4(text) {
-  const matcher = /[0-9.]+/gu;
+  const tokenMatcher = /\S+/gu;
+  const candidateMatcher = /[0-9.]+/gu;
   const spans = [];
-  for (let match = matcher.exec(text); match; match = matcher.exec(text)) {
-    spans.push({ start: match.index, end: match.index + match[0].length });
+  for (let token = tokenMatcher.exec(text); token; token = tokenMatcher.exec(text)) {
+    const urlStart = findUrlStart(token[0]);
+    candidateMatcher.lastIndex = 0;
+    for (let candidate = candidateMatcher.exec(token[0]); candidate;
+      candidate = candidateMatcher.exec(token[0])) {
+      if (urlStart >= 0 && candidate.index >= urlStart) continue;
+      const start = token.index + candidate.index;
+      spans.push({ start, end: start + candidate[0].length });
+    }
   }
   return spans;
 }
