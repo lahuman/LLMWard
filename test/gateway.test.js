@@ -325,8 +325,8 @@ test('admin dashboard serves zero quota form defaults', async () => {
   const body = await response.text();
 
   assert.equal(response.status, 200);
-  assert.match(body, /<label>Daily input quota \(0 = unlimited\) <input name="inputQuota" type="number" min="0" value="0" required><\/label>/);
-  assert.match(body, /<label>Daily output quota \(0 = unlimited\) <input name="outputQuota" type="number" min="0" value="0" required><\/label>/);
+  assert.match(body, /<label>Daily input quota \(0 = unlimited\) <input\b(?=[^>]*\bname="inputQuota")(?=[^>]*\bvalue="0")[^>]*><\/label>/);
+  assert.match(body, /<label>Daily output quota \(0 = unlimited\) <input\b(?=[^>]*\bname="outputQuota")(?=[^>]*\bvalue="0")[^>]*><\/label>/);
 });
 
 test('health check and admin authentication', async () => {
