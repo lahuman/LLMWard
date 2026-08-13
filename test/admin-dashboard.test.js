@@ -1149,6 +1149,109 @@ test('token rotation requires confirmation and reuses the one-time token result'
   assert.equal(harness.confirmCount, 0);
 });
 
+test('pending token rotation refresh isolates every resource dialog entry point', async () => {
+  const user = {
+    id: 28, username: 'isolated-rotation-user', is_active: true,
+    max_daily_input_tokens: 0, max_daily_output_tokens: 0,
+    permissions_valid: true, allowed_models: [], created_at: '2026-08-13T00:00:00.000Z',
+  };
+  const refresh = deferred();
+  const mutation = deferred();
+  const token = 'isolated-rotation-token';
+  let userLoads = 0;
+  let discoveryRequests = 0;
+  const harness = createDashboardHarness({
+    storedKey: 'stored-admin-key',
+    fetchOverride(route, options) {
+      if (route === '/admin/users' && !options.method) {
+        userLoads += 1;
+        return userLoads === 1 ? response([user]) : refresh.promise;
+      }
+      if (route === '/admin/models') return response([dashboardModel()]);
+      if (route === '/admin/providers') return response([dashboardProvider()]);
+      if (route === '/admin/users/28/rotate-token' && options.method === 'POST') return mutation.promise;
+      if (route === '/admin/providers/7/discover-models') {
+        discoveryRequests += 1;
+        return response([{ model_name: 'must-not-open' }]);
+      }
+      return undefined;
+    },
+  });
+  await settle();
+  const oldRotate = findButton(harness.usersContent, 'Rotate token');
+  const discover = findButton(harness.providersContent, 'Discover models');
+
+  oldRotate.dispatchEvent(new Event('click'));
+  harness.userForm.elements.username.value = 'preserve-confirm-user-form';
+  harness.modelForm.elements.modelName.value = 'preserve-confirm-model-form';
+  harness.providerForm.elements.providerName.value = 'preserve-confirm-provider-form';
+  discover.dispatchEvent(new Event('click'));
+  harness.createUser.dispatchEvent(new Event('click'));
+  harness.createModel.dispatchEvent(new Event('click'));
+  harness.createProvider.dispatchEvent(new Event('click'));
+  await settle();
+  assert.equal(harness.confirmDialog.open, true);
+  assert.equal(discoveryRequests, 0);
+  assert.equal(harness.userDialog.showModalCount, 0);
+  assert.equal(harness.modelDialog.showModalCount, 0);
+  assert.equal(harness.providerDialog.showModalCount, 0);
+  assert.equal(harness.userForm.elements.username.value, 'preserve-confirm-user-form');
+  assert.equal(harness.modelForm.elements.modelName.value, 'preserve-confirm-model-form');
+  assert.equal(harness.providerForm.elements.providerName.value, 'preserve-confirm-provider-form');
+
+  harness.confirmForm.dispatchEvent(new Event('submit', { cancelable: true }));
+  await settle();
+  mutation.resolve(response({ apiToken: token }));
+  await settle();
+
+  assert.equal(harness.confirmDialog.open, false);
+  assert.equal(harness.userDialog.open, false);
+  assert.equal(harness.userTokenValue.textContent, '');
+  harness.userForm.elements.username.value = 'preserve-user-form';
+  harness.modelForm.elements.modelName.value = 'preserve-model-form';
+  harness.providerForm.elements.providerName.value = 'preserve-provider-form';
+
+  discover.dispatchEvent(new Event('click'));
+  harness.createUser.dispatchEvent(new Event('click'));
+  harness.createModel.dispatchEvent(new Event('click'));
+  harness.createProvider.dispatchEvent(new Event('click'));
+  await settle();
+
+  assert.equal(discoveryRequests, 0);
+  assert.equal(harness.userDialog.showModalCount, 0);
+  assert.equal(harness.modelDialog.showModalCount, 0);
+  assert.equal(harness.providerDialog.showModalCount, 0);
+  assert.equal(harness.userDialog.open, false);
+  assert.equal(harness.modelDialog.open, false);
+  assert.equal(harness.providerDialog.open, false);
+  assert.equal(harness.userForm.elements.username.value, 'preserve-user-form');
+  assert.equal(harness.modelForm.elements.modelName.value, 'preserve-model-form');
+  assert.equal(harness.providerForm.elements.providerName.value, 'preserve-provider-form');
+  assert.equal(harness.userTokenValue.textContent, '');
+
+  refresh.resolve(response([user]));
+  await settle();
+
+  const newRotate = findButton(harness.usersContent, 'Rotate token');
+  assert.notEqual(newRotate, oldRotate);
+  assert.equal(harness.userDialog.showModalCount, 1);
+  assert.equal(harness.userDialog.open, true);
+  assert.equal(harness.modelDialog.showModalCount, 0);
+  assert.equal(harness.providerDialog.showModalCount, 0);
+  assert.equal(harness.userTokenResult.classList.contains('hidden'), false);
+  assert.equal(harness.userTokenValue.textContent, token);
+  assert.equal(harness.userTokenCopy.focusCount, 1);
+
+  harness.userTokenClose.dispatchEvent(new Event('click'));
+  assert.equal(harness.userDialog.open, false);
+  assert.equal(harness.userTokenValue.textContent, '');
+  assert.equal(oldRotate.focusCount, 0);
+  assert.equal(newRotate.focusCount, 1);
+  assert.equal(harness.userForm.elements.username.value, 'preserve-user-form');
+  assert.equal(harness.modelForm.elements.modelName.value, 'preserve-model-form');
+  assert.equal(harness.providerForm.elements.providerName.value, 'preserve-provider-form');
+});
+
 test('pending user creation cannot be canceled reopened or submitted twice', async () => {
   const mutation = deferred();
   const token = 'only-valid-created-token';
