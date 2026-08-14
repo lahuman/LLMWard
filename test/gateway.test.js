@@ -599,6 +599,28 @@ test('model identifiers can be renamed without breaking explicit user access', a
   assert.equal((await chat(user.token, 'rename-target', 1)).status, 200);
 });
 
+test('leading-slash model identifiers register and route unchanged', async () => {
+  const modelName = '/model/qwen3-1.7';
+  const created = await admin('/admin/models', {
+    method: 'POST', body: { model_name: modelName, display_name: 'Qwen 3 1.7B', provider_id: providerId, max_tokens: 2 }
+  });
+  assert.equal(created.status, 201);
+  assert.equal(created.body.model_name, modelName);
+
+  const user = await createUser('leading-slash-model-user', [modelName]);
+  const models = await request('/v1/models', {
+    headers: { Authorization: `Bearer ${user.token}` }
+  });
+  assert.equal(models.status, 200);
+  assert.ok(models.body.some((model) => model.id === modelName));
+
+  const callsBefore = providerCalls.get(modelName) || 0;
+  const response = await chat(user.token, modelName, 1);
+  assert.equal(response.status, 200);
+  assert.equal(providerCalls.get(modelName), callsBefore + 1);
+  assert.equal(response.body.model, modelName);
+});
+
 test('input quota is enforced after exact provider usage is recorded', async () => {
   const user = await createUser('input-quota-user', ['input-limit'], 2, 10);
   assert.equal((await chat(user.token, 'input-limit', 1)).status, 200);
