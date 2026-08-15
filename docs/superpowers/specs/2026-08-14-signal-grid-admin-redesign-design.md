@@ -1,7 +1,7 @@
 # Signal Grid Admin Redesign Design
 
 **Date:** 2026-08-14
-**Status:** Approved
+**Status:** Implemented and verified (2026-08-15)
 **Selected concept:** B — Signal Grid
 
 ## Goal
@@ -233,6 +233,15 @@ The intended production change is limited to:
 - focused dashboard regression tests under `test/`
 
 No backend, schema, package, Docker, or deployment change is expected.
+
+## Implementation Result
+
+Signal Grid was implemented through commit `99a8ce4` with production changes limited to `public/admin-dashboard.html`, `public/admin-dashboard.css`, and `public/admin-dashboard.js`, plus focused regressions in `test/admin-dashboard.test.js`.
+
+- The six-section shell, effective Gateway path, shared seven-day Overview and Usage snapshot, metadata-only activity, provider snapshot, responsive layout, and accessibility contracts were implemented as specified.
+- Administrator keys are memory-only. Session generation guards isolate delayed successes, failures, 401/403 responses, discovery and mutation continuations, dialogs, credentials, and one-time tokens across sign-out and relogin.
+- No backend route, response shape, database schema, dependency, build step, Docker setting, external font, icon package, or remote asset changed.
+- Focused dashboard and full repository tests passed, `git diff --check` passed, and live Edge checks covered the planned desktop and narrow layouts, keyboard focus containment, session boundaries, secret scrubbing, and page errors.
 
 ## Verification
 

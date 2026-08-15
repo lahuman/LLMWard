@@ -2,6 +2,8 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
+**Status:** Implemented and verified on 2026-08-15 through commit `99a8ce4`. The checklist below is retained as the execution specification; focused dashboard and full repository tests, diff validation, and live Edge layout, focus, session-isolation, and secret-scrubbing checks passed.
+
 **Goal:** Turn the existing administrator dashboard into the approved dark Signal Grid Gateway console, with a read-only Overview, memory-only administrator authentication, resilient shared seven-day statistics, responsive labelled navigation, and stronger table/status accessibility.
 
 **Architecture:** Keep the current static HTML, one CSS file, and one vanilla-JavaScript controller. Extend the existing client state with one fixed seven-day statistics snapshot and one guarded in-flight promise; derive Overview counts only from existing list responses; keep every mutation and backend API unchanged. Drive the regression suite through the real login, navigation, and form events in the existing fake DOM.
@@ -10,10 +12,11 @@
 
 ## Global Constraints
 
-- Execute in an isolated worktree using superpowers:using-git-worktrees. The primary worktree already has unrelated edits in routes/admin.js, routes/v1.js, and test/gateway.test.js, plus an untracked .superpowers directory. Never modify, stage, or commit them.
+- Execute in an isolated worktree using superpowers:using-git-worktrees. Implementation used that isolation and excluded unrelated primary-worktree changes from every feature commit.
 - Production scope is only public/admin-dashboard.html, public/admin-dashboard.css, and public/admin-dashboard.js. Regression scope is only test/admin-dashboard.test.js.
 - Preserve every existing API route, payload, response shape, dialog, confirmation, pending-operation guard, one-time token clearing rule, provider credential rule, filter warning, and safe DOM-construction rule.
-- Never render, persist, log, or place in browser storage prompts, message arrays, generated content, provider error bodies, raw user tokens, administrator keys, provider credentials, or filter patterns.
+- Never render, persist, or log prompts, message arrays, generated content, or provider error bodies.
+- In the administrator UI, administrator keys, provider credentials, plaintext filter patterns, and raw user tokens may be displayed only in their existing purpose-limited password/edit controls or one-time token result. Do not copy them into metrics, activity, DOM data attributes, logs, URLs, cookies, or browser storage; never prefill stored provider credentials; clear one-time tokens and sensitive form values when their dialog closes or the session ends.
 - Continue to build administrator-controlled content with textContent, createTextNode, and node(). Do not introduce innerHTML.
 - Keep 401 and 403 fail-closed: clear the in-memory key and password input, hide the dashboard, and show login. Only non-authentication statistics failures are recoverable local panel failures.
 - Keep mutation refreshes on loadAll() only. Do not add statistics refreshes to mutation paths.

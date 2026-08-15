@@ -1,4 +1,4 @@
-# LLM Gateway
+# LLMWard Gateway
 
 단일 서버에서 운영하는 **100명 이하 온프레미스 조직용** OpenAI 호환 LLM 접근 관리 Gateway입니다.
 
@@ -8,16 +8,16 @@
 - 결제·충전·실제 청구 시스템이 아닌 사용량·예상 비용 관리 도구
 - 지원 API: `GET /v1/models`, `POST /v1/chat/completions`와 SSE streaming
 - 관리자 정의 리터럴 규칙으로 전체 또는 모델별 입력 차단·마스킹과 출력 마스킹 지원
-- 관리자 화면 이미지 위치: `docs/images/admin-dashboard.png` (릴리스 캡처 추가 예정)
+- B안 Signal Grid 관리자 콘솔: Overview와 Users/Models/Providers/Filters/Usage의 반응형·접근성 탐색
 
 ## 10분 Quick Start
 
-Node.js 20 이상이 필요합니다.
+Node.js 22 이상이 필요합니다.
 
 ```powershell
-npm install
-npm run setup
-npm start
+npm.cmd install
+npm.cmd run setup
+npm.cmd start
 ```
 
 `setup`이 처음 한 번만 표시하는 관리자 키를 안전한 비밀 저장소에 보관합니다. 이후 `http://localhost:3000/admin/`에서 다음 순서로 설정합니다.
@@ -41,16 +41,29 @@ Chat Completions는 상태를 저장하지 않습니다. LLMWard는 요청에 �
 진단과 백업:
 
 ```powershell
-npm run doctor
-npm run backup
+npm.cmd run doctor
+npm.cmd run backup
 ```
+
+## 관리자 콘솔: Signal Grid
+
+최종 확정한 B안 **Signal Grid**를 `/admin/`에 적용했습니다. 기존 관리 API와 데이터 모델은 유지하며 정적 HTML, CSS, vanilla JavaScript만 사용합니다.
+
+- 여섯 섹션은 `Overview`, `Users`, `Models`, `Providers`, `Filters`, `Usage` 순서입니다.
+- Overview의 `Users → Policies → Models → Providers` 경로는 현재 유효한 리소스 수를 요약하며, 각 노드에서 해당 관리 섹션으로 이동할 수 있습니다.
+- Overview는 고정 7일 요청 수·성공률·p95 응답 시간·예상 비용(청구 아님), 공급자 상태, 최근 요청 최대 5건을 표시합니다.
+- 최근 요청에는 시간, 사용자, 모델, 상태·오류 유형, 토큰 수와 응답 시간만 표시합니다. 프롬프트, 메시지, 응답 본문, 공급자 오류 본문, 자격증명, 원문 토큰과 관리자 키는 표시하지 않습니다.
+- 관리자 키는 브라우저 저장소에 쓰지 않고 현재 페이지의 JavaScript 메모리에만 유지합니다. 새로고침, 로그아웃 또는 현재 세션의 인증 실패 후에는 다시 로그인해야 합니다.
+- 데스크톱에서는 라벨이 있는 탐색 레일을, 840px 미만에서는 가로 스크롤 탐색을 사용합니다. 표와 네이티브 대화상자는 키보드, 포커스와 스크린리더 사용을 지원합니다.
+
+상세 결정과 검증 범위는 [Signal Grid 관리자 콘솔 설계](docs/superpowers/specs/2026-08-14-signal-grid-admin-redesign-design.md)에 정리되어 있습니다.
 
 ## Docker
 
 `.env`와 영속 `data` 디렉터리만 준비합니다.
 
 ```powershell
-npm run setup
+npm.cmd run setup
 docker compose up --build -d
 ```
 
@@ -101,14 +114,14 @@ Generic OpenAI-compatible, Ollama, vLLM, LM Studio, llama.cpp server, LocalAI, N
 ## 검증
 
 ```powershell
-npm test
-npm audit --omit=dev
-npm run benchmark
+npm.cmd test
+npm.cmd audit --omit=dev
+npm.cmd run benchmark
 ```
 
 테스트와 벤치마크는 로컬 mock provider와 임시 SQLite DB만 사용합니다. 운영 `data/gateway.db`나 인터넷 공급자에 의존하지 않습니다.
 
-자세한 문서: [API](docs/API.md), [호환성](docs/COMPATIBILITY.md), [백업/복구](docs/BACKUP_RESTORE.md), [위협 모델](docs/THREAT_MODEL.md), [마이그레이션](docs/MIGRATIONS.md), [벤치마크](docs/BENCHMARK.md).
+자세한 문서: [관리자 콘솔 설계](docs/superpowers/specs/2026-08-14-signal-grid-admin-redesign-design.md), [API](docs/API.md), [호환성](docs/COMPATIBILITY.md), [백업/복구](docs/BACKUP_RESTORE.md), [위협 모델](docs/THREAT_MODEL.md), [마이그레이션](docs/MIGRATIONS.md), [벤치마크](docs/BENCHMARK.md).
 
 ## 비목표
 
@@ -118,10 +131,6 @@ npm run benchmark
 
 [MIT License](LICENSE)로 배포됩니다.
 
-## Built-in Korean PII filter
+## Built-in Korean PII 및 Secret Filter
 
-The global Built-in Korean PII & Secret Filter card is disabled by default.
-Administrators can only enable it; reviewed rules are edited in
-`services/pii-filter.js` together with tests. PII pseudonym mappings are
-request-local, while detected secrets return `[FILTERED]` and are never restored.
-The filter is not output DLP or a general DLP system.
+전역 Built-in Korean PII & Secret Filter는 기본 비활성입니다. 관리자 화면에서는 활성 상태만 변경할 수 있으며, 검토된 규칙은 `services/pii-filter.js`와 테스트에서 함께 관리합니다. PII 가명 매핑은 요청 범위에서만 유지되고, 탐지한 비밀은 `[FILTERED]`로 비가역 치환됩니다. 출력 DLP나 범용 DLP 시스템은 아닙니다.
