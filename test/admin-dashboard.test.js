@@ -622,6 +622,16 @@ test('Signal Grid approved color pairs meet their contrast targets', () => {
   assert.ok(contrastRatio('#596777', '#111821') >= 3);
 });
 
+test('disabled text controls use distinct readable approved-token styling', () => {
+  const css = fs.readFileSync(path.join(__dirname, '..', 'public', 'admin-dashboard.css'), 'utf8');
+  assert.match(css, /input:not\(\[type="checkbox"\]\):disabled,\s*select:disabled,\s*textarea:disabled\s*\{[^}]*color:\s*var\(--text-muted\);[^}]*background:\s*var\(--surface-page\);[^}]*cursor:\s*not-allowed;[^}]*opacity:\s*1;/su);
+});
+
+test('all checkboxes reset the text-control box model', () => {
+  const css = fs.readFileSync(path.join(__dirname, '..', 'public', 'admin-dashboard.css'), 'utf8');
+  assert.match(css, /input\[type="checkbox"\]\s*\{[^}]*width:\s*auto;[^}]*min-height:\s*auto;[^}]*padding:\s*0;[^}]*border:\s*0;[^}]*background:\s*transparent;/su);
+});
+
 test('filters tab keeps the built-in PII filter before its sibling usage guide', () => {
   const html = fs.readFileSync(path.join(__dirname, '..', 'public', 'admin-dashboard.html'), 'utf8');
   assert.match(html, /<section id="tab-filters"[^>]*>\s*<section id="built-in-pii-filter"[\s\S]*?<\/section>\s*<section id="filter-usage-guide"/);
