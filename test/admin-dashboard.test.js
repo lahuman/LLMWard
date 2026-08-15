@@ -561,6 +561,67 @@ function dashboardStats(overrides = {}) {
     period,
   };
 }
+function contrastRatio(foreground, background) {
+  const luminance = (hex) => {
+    const channels = hex.slice(1).match(/../gu).map((channel) => parseInt(channel, 16) / 255);
+    const linear = channels.map((channel) => channel <= 0.04045 ? channel / 12.92 : ((channel + 0.055) / 1.055) ** 2.4);
+    return 0.2126 * linear[0] + 0.7152 * linear[1] + 0.0722 * linear[2];
+  };
+  const first = luminance(foreground);
+  const second = luminance(background);
+  return (Math.max(first, second) + 0.05) / (Math.min(first, second) + 0.05);
+}
+
+test('Signal Grid stylesheet preserves the approved visual and privacy contracts', () => {
+  const css = fs.readFileSync(path.join(__dirname, '..', 'public', 'admin-dashboard.css'), 'utf8');
+  const html = fs.readFileSync(path.join(__dirname, '..', 'public', 'admin-dashboard.html'), 'utf8');
+  const script = fs.readFileSync(path.join(__dirname, '..', 'public', 'admin-dashboard.js'), 'utf8');
+  const tokens = {
+    '--surface-root': '#080b0f',
+    '--surface-page': '#0e1319',
+    '--surface-panel': '#111821',
+    '--border': '#596777',
+    '--text': '#e7ecf2',
+    '--text-muted': '#96a2b1',
+    '--accent': '#ffb454',
+    '--on-accent': '#241406',
+    '--success': '#58d597',
+    '--danger': '#f17c74',
+    '--on-danger': '#210b0a',
+    '--info': '#78a9ff',
+  };
+  for (const [name, value] of Object.entries(tokens)) {
+    assert.match(css, new RegExp(`${name}:\\s*${value}`));
+  }
+  assert.match(css, /color-scheme:\s*dark/u);
+  assert.match(css, /button,\s*input,\s*select,\s*textarea\s*\{[^}]*min-height:\s*36px/su);
+  assert.match(css, /:focus-visible\s*\{\s*outline:\s*2px solid var\(--accent\);\s*outline-offset:\s*2px;\s*\}/u);
+  assert.match(css, /\.app-shell\s*\{[^}]*grid-template-columns:\s*176px minmax\(0,\s*1fr\)/su);
+  assert.match(css, /\.workspace\s*\{[^}]*min-width:\s*0/su);
+  assert.match(css, /\.provider-snapshot li > \*\s*\{[^}]*min-width:\s*0;[^}]*overflow-wrap:\s*anywhere/su);
+  assert.match(css, /\.table-wrap\s*\{[^}]*max-width:\s*100%;[^}]*overflow-x:\s*auto/su);
+  assert.match(script, /wrap\.tabIndex\s*=\s*0;/u);
+  assert.match(css, /@media\s*\(max-width:\s*839px\)\s*\{[\s\S]*?\.app-shell\s*\{[^}]*display:\s*block[\s\S]*?\.rail-nav\s*\{[^}]*overflow-x:\s*auto[\s\S]*?\.gateway-path\s*\{[^}]*grid-template-columns:\s*minmax\(0,\s*1fr\)/u);
+  assert.match(css, /@media\s*\(max-width:\s*520px\)\s*\{[\s\S]*?\.grid\s*\{[^}]*grid-template-columns:\s*minmax\(0,\s*1fr\)/u);
+  assert.match(css, /@media\s*\(prefers-reduced-motion:\s*reduce\)\s*\{[\s\S]*?transition-duration:\s*\.01ms !important;/u);
+  assert.doesNotMatch(css, /url\s*\(/iu);
+  for (const copy of [
+    'cannot be retrieved again',
+    'it is not general DLP',
+    'stored in plaintext in SQLite and backups',
+    'do not enter secrets, prompts, or response examples',
+  ]) {
+    assert.ok(html.includes(copy));
+  }
+});
+
+test('Signal Grid approved color pairs meet their contrast targets', () => {
+  assert.ok(contrastRatio('#e7ecf2', '#0e1319') >= 4.5);
+  assert.ok(contrastRatio('#96a2b1', '#111821') >= 4.5);
+  assert.ok(contrastRatio('#ffb454', '#080b0f') >= 3);
+  assert.ok(contrastRatio('#596777', '#111821') >= 3);
+});
+
 test('filters tab keeps the built-in PII filter before its sibling usage guide', () => {
   const html = fs.readFileSync(path.join(__dirname, '..', 'public', 'admin-dashboard.html'), 'utf8');
   assert.match(html, /<section id="tab-filters"[^>]*>\s*<section id="built-in-pii-filter"[\s\S]*?<\/section>\s*<section id="filter-usage-guide"/);
