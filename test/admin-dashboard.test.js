@@ -533,6 +533,7 @@ test('Signal Grid shell labels the six ordered native navigation sections', () =
   assert.deepEqual([...nav[0].matchAll(/<button id="([^"]+)"[^>]*aria-current="page"/gu)].map((match) => match[1]), ['tab-button-overview']);
   assert.doesNotMatch(nav[0], /aria-selected/);
   assert.match(html, /<section id="tab-overview"[\s\S]*?<section id="onboarding"[\s\S]*?<div id="overview-stats-content"/);
+  assert.equal((html.match(/<span class="gateway-arrow" aria-hidden="true">→<\/span>/gu) || []).length, 3);
 });
 
 test('Signal Grid navigation selects Filters after authentication', async () => {
