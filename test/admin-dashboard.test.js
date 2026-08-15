@@ -167,6 +167,10 @@ function response(body) {
   return { ok: true, status: 200, json: async () => body };
 }
 
+function errorResponse(status, error) {
+  return { ok: false, status, json: async () => ({ error }) };
+}
+
 function deferred() {
   let resolve;
   const promise = new Promise((resolvePromise) => {
@@ -416,6 +420,7 @@ function createDashboardHarness({
     overviewProvidersContent: document.getElementById('overview-providers-content'),
     overviewStatsContent: document.getElementById('overview-stats-content'),
     overviewActivityContent: document.getElementById('overview-activity-content'),
+    statsForm,
     statsContent: document.getElementById('stats-content'),
     usageContent: document.getElementById('usage-content'),
     modelStatsContent: document.getElementById('model-stats-content'),
@@ -634,6 +639,365 @@ test('Gateway overview derives effective resources and transfers focus to Models
   assert.equal(modelsNav.focusCount, 1);
 });
 
+test('initial seven-day statistics are shared by Overview and Usage', async () => {
+  const harness = createDashboardHarness({
+    loginKey: 'admin-key',
+    fetchOverride(route) {
+      if (route === '/admin/stats?range=7d') {
+        return response(dashboardStats({ summary: { total_requests: 10, successful_requests: 9 } }));
+      }
+      return undefined;
+    },
+  });
+  await settle();
+
+  const statisticsUrls = () => harness.requests
+    .filter(({ route }) => route.startsWith('/admin/stats?'))
+    .map(({ route }) => route);
+  assert.deepEqual(statisticsUrls(), ['/admin/stats?range=7d']);
+  assert.equal(collectText(harness.overviewStatsContent).includes('90.0%'), true);
+  harness.navButtons.find((item) => item.dataset.tab === 'stats').dispatchEvent(new Event('click'));
+  assert.deepEqual(statisticsUrls(), ['/admin/stats?range=7d']);
+  assert.equal(collectText(harness.statsContent).includes('10'), true);
+});
+
+test('Overview uses explicit zero-request and unconfigured-cost states', async () => {
+  const harness = createDashboardHarness({ loginKey: 'admin-key' });
+  await settle();
+
+  const text = collectText(harness.overviewStatsContent);
+  assert.equal(text.filter((value) => value === 'No requests').length, 2);
+  assert.equal(text.includes('Not configured'), true);
+  assert.equal(text.includes('0.0%'), false);
+  assert.equal(text.includes('0 ms'), false);
+});
+
+test('failed initial statistics stay local and Overview retry is deduplicated', async () => {
+  const retry = deferred();
+  let statsRequests = 0;
+  const harness = createDashboardHarness({
+    loginKey: 'admin-key',
+    fetchOverride(route) {
+      if (route === '/admin/users') return response([{ username: 'usable', is_active: true, permissions_valid: true }]);
+      if (route === '/admin/stats?range=7d') {
+        statsRequests += 1;
+        return statsRequests === 1 ? errorResponse(500, 'statistics offline') : retry.promise;
+      }
+      return undefined;
+    },
+  });
+  await settle();
+
+  assert.equal(harness.dashboard.classList.contains('hidden'), false);
+  assert.equal(harness.overviewUsersCount.textContent, '1');
+  assert.equal(collectText(harness.overviewStatsContent).includes('statistics offline'), true);
+  assert.equal(collectText(harness.statsContent).includes('statistics offline'), true);
+  const usersNav = harness.navButtons.find((item) => item.dataset.tab === 'users');
+  const overviewNav = harness.navButtons.find((item) => item.dataset.tab === 'overview');
+  usersNav.dispatchEvent(new Event('click'));
+  overviewNav.dispatchEvent(new Event('click'));
+  overviewNav.dispatchEvent(new Event('click'));
+  await settle();
+  assert.equal(statsRequests, 2);
+  assert.equal(harness.status.classList.contains('hidden'), true);
+
+  retry.resolve(response(dashboardStats({ summary: { total_requests: 12, successful_requests: 12 } })));
+  await settle();
+  assert.equal(collectText(harness.overviewStatsContent).includes('statistics offline'), false);
+  assert.equal(collectText(harness.overviewStatsContent).includes('100.0%'), true);
+  assert.equal(collectText(harness.statsContent).includes('12'), true);
+});
+
+test('Usage Apply owns its range before fetching and seven-day retry cannot overwrite it', async () => {
+  const applied = deferred();
+  let sevenDayRequests = 0;
+  const harness = createDashboardHarness({
+    loginKey: 'admin-key',
+    fetchOverride(route) {
+      if (route === '/admin/stats?range=7d') {
+        sevenDayRequests += 1;
+        if (sevenDayRequests === 1) return errorResponse(500, 'initial statistics failed');
+        return response(dashboardStats({ summary: { total_requests: 7, successful_requests: 7 } }));
+      }
+      if (route === '/admin/stats?range=30d') return applied.promise;
+      return undefined;
+    },
+  });
+  await settle();
+
+  harness.navButtons.find((item) => item.dataset.tab === 'stats').dispatchEvent(new Event('click'));
+  harness.statsForm.values.range = '30d';
+  harness.statsForm.dispatchEvent(new Event('submit', { cancelable: true }));
+  harness.navButtons.find((item) => item.dataset.tab === 'overview').dispatchEvent(new Event('click'));
+  await settle();
+  assert.equal(collectText(harness.overviewStatsContent).includes('7'), true);
+  assert.equal(collectText(harness.statsContent).includes('7'), false);
+  assert.equal(collectText(harness.statsContent).includes('initial statistics failed'), true);
+  assert.equal(harness.status.classList.contains('hidden'), true);
+
+  applied.resolve(response(dashboardStats({ summary: { total_requests: 30, successful_requests: 30 } })));
+  await settle();
+  assert.equal(collectText(harness.statsContent).includes('30'), true);
+  assert.equal(collectText(harness.statsContent).includes('7'), false);
+  assert.deepEqual(
+    harness.requests.filter(({ route }) => route.startsWith('/admin/stats?')).map(({ route }) => route),
+    ['/admin/stats?range=7d', '/admin/stats?range=30d', '/admin/stats?range=7d'],
+  );
+});
+
+test('Usage non-authentication failures stay local and preserve Overview', async () => {
+  const harness = createDashboardHarness({
+    loginKey: 'admin-key',
+    fetchOverride(route) {
+      if (route === '/admin/stats?range=7d') {
+        return response(dashboardStats({ summary: { total_requests: 5, successful_requests: 5 } }));
+      }
+      if (route === '/admin/stats?range=30d') return errorResponse(500, 'range unavailable');
+      return undefined;
+    },
+  });
+  await settle();
+
+  harness.statsForm.values.range = '30d';
+  harness.statsForm.dispatchEvent(new Event('submit', { cancelable: true }));
+  await settle();
+  assert.equal(collectText(harness.overviewStatsContent).includes('5'), true);
+  for (const panel of [harness.statsContent, harness.usageContent, harness.modelStatsContent, harness.providerStatsContent, harness.requestContent]) {
+    assert.equal(collectText(panel).includes('range unavailable'), true);
+  }
+  assert.equal(harness.dashboard.classList.contains('hidden'), false);
+  assert.equal(harness.status.classList.contains('hidden'), true);
+});
+
+test('Overview recent activity is limited to five metadata-only rows', async () => {
+  const secrets = {
+    prompt: 'secret-prompt',
+    response: 'secret-response',
+    provider_error_body: 'secret-provider-error',
+    stored_api_key: 'secret-provider-key',
+    admin_key: 'secret-admin-key',
+    token: 'secret-user-token',
+    patterns: ['secret-pattern'],
+    base_url: 'https://secret-provider.example/private',
+  };
+  const recentRequests = Array.from({ length: 6 }, (_, index) => ({
+    created_at: `2026-08-15T01:0${index}:00.000Z`,
+    username: index === 5 ? 'sixth-user' : `user-${index + 1}`,
+    user_id: index + 1,
+    model_name: `model-${index + 1}`,
+    provider_id: 7,
+    status: 'success',
+    error_type: null,
+    input_tokens: index + 1,
+    output_tokens: index + 2,
+    response_time_ms: index + 3,
+    estimated_cost_usd: 0,
+    cost_configured: true,
+    ...secrets,
+  }));
+  const harness = createDashboardHarness({
+    loginKey: 'admin-key',
+    fetchOverride(route) {
+      if (route === '/admin/stats?range=7d') return response(dashboardStats({ recent_requests: recentRequests }));
+      return undefined;
+    },
+  });
+  await settle();
+
+  const bodies = findNodes(harness.overviewActivityContent, (item) => item.tagName === 'TBODY');
+  assert.equal(bodies.length, 1);
+  assert.equal(bodies[0].children.length, 5);
+  const text = collectText(harness.overviewActivityContent);
+  assert.equal(text.includes('sixth-user'), false);
+  for (const secret of Object.values(secrets).flat()) assert.equal(text.includes(secret), false);
+});
+
+test('initial statistics 401 follows the central fail-closed login path', async () => {
+  const delayedConfiguration = deferred();
+  const harness = createDashboardHarness({
+    loginKey: 'admin-key',
+    fetchOverride(route) {
+      if (route === '/admin/providers') return delayedConfiguration.promise;
+      if (route === '/admin/stats?range=7d') return errorResponse(401, 'expired admin key');
+      return undefined;
+    },
+  });
+  await settle();
+  delayedConfiguration.resolve(response([]));
+  await settle();
+
+  assert.equal(harness.login.classList.contains('hidden'), false);
+  assert.equal(harness.dashboard.classList.contains('hidden'), true);
+  assert.equal(harness.status.textContent, 'Authentication failed. The admin key was cleared.');
+  assert.equal(harness.status.className, 'status error');
+  assert.deepEqual(collectText(harness.overviewStatsContent), []);
+  assert.deepEqual(collectText(harness.statsContent), []);
+});
+
+test('Usage Apply 403 follows the central fail-closed login path', async () => {
+  const harness = createDashboardHarness({
+    loginKey: 'admin-key',
+    fetchOverride(route) {
+      if (route === '/admin/stats?range=30d') return errorResponse(403, 'forbidden');
+      return undefined;
+    },
+  });
+  await settle();
+
+  harness.statsForm.values.range = '30d';
+  harness.statsForm.dispatchEvent(new Event('submit', { cancelable: true }));
+  await settle();
+  assert.equal(harness.login.classList.contains('hidden'), false);
+  assert.equal(harness.dashboard.classList.contains('hidden'), true);
+  assert.equal(harness.status.textContent, 'Authentication failed. The admin key was cleared.');
+  assert.deepEqual(collectText(harness.overviewStatsContent), []);
+  assert.deepEqual(collectText(harness.statsContent), []);
+});
+
+test('late seven-day success after sign-out cannot restore cleared statistics', async () => {
+  const oldStatistics = deferred();
+  const harness = createDashboardHarness({
+    loginKey: 'old-admin-key',
+    fetchOverride(route) {
+      if (route === '/admin/stats?range=7d') return oldStatistics.promise;
+      return undefined;
+    },
+  });
+  await settle();
+  harness.signOut.dispatchEvent(new Event('click'));
+  oldStatistics.resolve(response(dashboardStats({ summary: { total_requests: 99, successful_requests: 99 } })));
+  await settle();
+
+  assert.equal(harness.login.classList.contains('hidden'), false);
+  assert.deepEqual(collectText(harness.overviewStatsContent), []);
+  assert.deepEqual(collectText(harness.statsContent), []);
+});
+
+test('late non-authentication failure from an old key cannot overwrite a new session', async () => {
+  const oldStatistics = deferred();
+  const harness = createDashboardHarness({
+    loginKey: 'old-admin-key',
+    fetchOverride(route, options) {
+      if (route !== '/admin/stats?range=7d') return undefined;
+      if (options.headers['X-Admin-Key'] === 'old-admin-key') return oldStatistics.promise;
+      return response(dashboardStats({ summary: { total_requests: 22, successful_requests: 22 } }));
+    },
+  });
+  await settle();
+  harness.signOut.dispatchEvent(new Event('click'));
+  harness.adminKey.value = 'new-admin-key';
+  harness.loginForm.dispatchEvent(new Event('submit', { cancelable: true }));
+  await settle();
+  oldStatistics.resolve(errorResponse(500, 'stale statistics failure'));
+  await settle();
+
+  assert.equal(harness.dashboard.classList.contains('hidden'), false);
+  assert.equal(collectText(harness.overviewStatsContent).includes('22'), true);
+  assert.equal(collectText(harness.overviewStatsContent).includes('stale statistics failure'), false);
+  assert.equal(collectText(harness.statsContent).includes('22'), true);
+});
+
+test('late Usage Apply success after sign-out cannot restore cleared statistics', async () => {
+  const applied = deferred();
+  const harness = createDashboardHarness({
+    loginKey: 'admin-key',
+    fetchOverride(route) {
+      if (route === '/admin/stats?range=30d') return applied.promise;
+      return undefined;
+    },
+  });
+  await settle();
+
+  harness.statsForm.values.range = '30d';
+  harness.statsForm.dispatchEvent(new Event('submit', { cancelable: true }));
+  harness.signOut.dispatchEvent(new Event('click'));
+  applied.resolve(response(dashboardStats({ summary: { total_requests: 44, successful_requests: 44 } })));
+  await settle();
+
+  assert.equal(harness.login.classList.contains('hidden'), false);
+  assert.deepEqual(collectText(harness.overviewStatsContent), []);
+  assert.deepEqual(collectText(harness.statsContent), []);
+});
+
+test('Overview retry 401 keeps the central fail-closed status', async () => {
+  let sevenDayRequests = 0;
+  const harness = createDashboardHarness({
+    loginKey: 'admin-key',
+    fetchOverride(route) {
+      if (route !== '/admin/stats?range=7d') return undefined;
+      sevenDayRequests += 1;
+      return sevenDayRequests === 1
+        ? errorResponse(500, 'statistics offline')
+        : errorResponse(401, 'expired during retry');
+    },
+  });
+  await settle();
+
+  harness.navButtons.find((item) => item.dataset.tab === 'overview').dispatchEvent(new Event('click'));
+  await settle();
+  assert.equal(harness.login.classList.contains('hidden'), false);
+  assert.equal(harness.dashboard.classList.contains('hidden'), true);
+  assert.equal(harness.status.textContent, 'Authentication failed. The admin key was cleared.');
+  assert.deepEqual(collectText(harness.overviewStatsContent), []);
+  assert.deepEqual(collectText(harness.statsContent), []);
+});
+
+test('late seven-day success cannot overwrite a same-key relogin', async () => {
+  const oldStatistics = deferred();
+  let sevenDayRequests = 0;
+  const harness = createDashboardHarness({
+    loginKey: 'same-admin-key',
+    fetchOverride(route) {
+      if (route !== '/admin/stats?range=7d') return undefined;
+      sevenDayRequests += 1;
+      if (sevenDayRequests === 1) return oldStatistics.promise;
+      return response(dashboardStats({ summary: { total_requests: 22, successful_requests: 22 } }));
+    },
+  });
+  await settle();
+  harness.signOut.dispatchEvent(new Event('click'));
+  harness.adminKey.value = 'same-admin-key';
+  harness.loginForm.dispatchEvent(new Event('submit', { cancelable: true }));
+  await settle();
+  oldStatistics.resolve(response(dashboardStats({ summary: { total_requests: 99, successful_requests: 99 } })));
+  await settle();
+
+  assert.equal(collectText(harness.overviewStatsContent).includes('22'), true);
+  assert.equal(collectText(harness.overviewStatsContent).includes('99'), false);
+  assert.equal(collectText(harness.statsContent).includes('22'), true);
+});
+
+test('late Usage Apply success cannot overwrite a same-key relogin', async () => {
+  const oldAppliedRange = deferred();
+  let sevenDayRequests = 0;
+  const harness = createDashboardHarness({
+    loginKey: 'same-admin-key',
+    fetchOverride(route) {
+      if (route === '/admin/stats?range=30d') return oldAppliedRange.promise;
+      if (route !== '/admin/stats?range=7d') return undefined;
+      sevenDayRequests += 1;
+      return response(dashboardStats({
+        summary: {
+          total_requests: sevenDayRequests === 1 ? 5 : 22,
+          successful_requests: sevenDayRequests === 1 ? 5 : 22,
+        },
+      }));
+    },
+  });
+  await settle();
+  harness.statsForm.values.range = '30d';
+  harness.statsForm.dispatchEvent(new Event('submit', { cancelable: true }));
+  harness.signOut.dispatchEvent(new Event('click'));
+  harness.adminKey.value = 'same-admin-key';
+  harness.loginForm.dispatchEvent(new Event('submit', { cancelable: true }));
+  await settle();
+  oldAppliedRange.resolve(response(dashboardStats({ summary: { total_requests: 44, successful_requests: 44 } })));
+  await settle();
+
+  assert.equal(collectText(harness.overviewStatsContent).includes('22'), true);
+  assert.equal(collectText(harness.statsContent).includes('22'), true);
+  assert.equal(collectText(harness.statsContent).includes('44'), false);
+});
 
 test('dashboard exposes labelled native resource and confirmation dialogs', () => {
   const html = fs.readFileSync(path.join(__dirname, '..', 'public', 'admin-dashboard.html'), 'utf8');
