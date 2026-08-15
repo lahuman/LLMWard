@@ -20,7 +20,7 @@ const MODEL_GENERATION_DEFAULTS = Object.freeze([
   ['frequency_penalty', 'default_frequency_penalty'],
   ['seed', 'default_seed']
 ]);
-const IDENTIFIER = /^(?=.{1,200}$)\/?[a-z0-9][a-z0-9_.:/-]*$/;
+const IDENTIFIER = /^(?=.{1,200}$)\/?[A-Za-z0-9][A-Za-z0-9_.:/-]*$/;
 
 function modelPermissions(serialized) {
   if (serialized === null || serialized === undefined) return { all: true };

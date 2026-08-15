@@ -621,6 +621,21 @@ test('leading-slash model identifiers register and route unchanged', async () =>
   assert.equal(response.body.model, modelName);
 });
 
+test('mixed-case model identifiers register and route unchanged', async () => {
+  const modelName = 'gemma4:e4b-32K';
+  const created = await admin('/admin/models', {
+    method: 'POST', body: { model_name: modelName, display_name: 'Gemma 4', provider_id: providerId, max_tokens: 2 }
+  });
+  assert.equal(created.status, 201);
+  assert.equal(created.body.model_name, modelName);
+
+  const user = await createUser('mixed-case-model-user', [modelName]);
+  const response = await chat(user.token, modelName, 1);
+  assert.equal(response.status, 200);
+  assert.equal(receivedPayloads.get(modelName).model, modelName);
+  assert.equal(response.body.model, modelName);
+});
+
 test('input quota is enforced after exact provider usage is recorded', async () => {
   const user = await createUser('input-quota-user', ['input-limit'], 2, 10);
   assert.equal((await chat(user.token, 'input-limit', 1)).status, 200);
@@ -783,7 +798,7 @@ test('admin input validation rejects unsafe values and references', async () => 
     admin('/admin/users', { method: 'POST', body: { username: 'fractional-quota', max_daily_input_tokens: 1.5, max_daily_output_tokens: 1 } }),
     admin('/admin/users', { method: 'POST', body: { username: 'unsafe-quota', max_daily_input_tokens: 1, max_daily_output_tokens: Number.MAX_SAFE_INTEGER + 1 } }),
     admin('/admin/users', { method: 'POST', body: { username: 'unknown-model', max_daily_input_tokens: 1, max_daily_output_tokens: 1, allowed_models: ['missing'] } }),
-    admin('/admin/models', { method: 'POST', body: { model_name: 'UPPER', display_name: 'Bad', provider_id: providerId, max_tokens: 1 } }),
+    admin('/admin/models', { method: 'POST', body: { model_name: 'bad model', display_name: 'Bad', provider_id: providerId, max_tokens: 1 } }),
     admin('/admin/models', { method: 'POST', body: { model_name: 'missing-provider', display_name: 'Bad', provider_id: 999999, max_tokens: 1 } }),
     admin('/admin/models', { method: 'POST', body: { model_name: 'bad-price', display_name: 'Bad', provider_id: providerId, max_tokens: 1, input_cost_per_million: -1 } }),
     admin('/admin/providers', { method: 'POST', body: { provider_name: 'ftp-provider', display_name: 'FTP', base_url: 'ftp://example.test', auth_type: 'none' } }),

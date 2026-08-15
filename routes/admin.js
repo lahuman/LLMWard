@@ -13,7 +13,7 @@ const { listFilters, createFilter, updateFilter, deleteFilter, getBuiltInPiiFilt
 
 const router = express.Router();
 const IDENTIFIER = /^[a-z0-9][a-z0-9_.-]{0,127}$/;
-const MODEL_IDENTIFIER = /^(?=.{1,200}$)\/?[a-z0-9][a-z0-9_.:/-]*$/;
+const MODEL_IDENTIFIER = /^(?=.{1,200}$)\/?[A-Za-z0-9][A-Za-z0-9_.:/-]*$/;
 const AUTH_TYPES = new Set(['none', 'api_key', 'bearer_token']);
 const USER_UPDATE_AUDIT_FIELDS = [
   'max_daily_input_tokens', 'max_daily_output_tokens', 'max_requests_per_minute',
