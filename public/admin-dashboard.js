@@ -1,6 +1,14 @@
   'use strict';
   const T=Object.freeze({loading:'Loading…',empty:'No records found.',notConfigured:'Not configured',signedIn:'Signed in.',signedOut:'Signed out.',saved:'Changes saved.',created:'Created successfully.',rotated:'Token rotated. The previous token is now invalid.',authFailed:'Authentication failed. The admin key was cleared.',requestFailed:'Request failed.',confirmRotate:'Rotate this user token? The previous token will stop working immediately.',confirmDeleteModel:'Delete this model permanently?',confirmDeleteProvider:'Delete this provider permanently?',promptInput:'Daily input quota (0 = unlimited)',promptOutput:'Daily output quota (0 = unlimited)',promptModels:'Allowed model identifiers separated by commas. Leave blank for all models.',promptIdentifier:'Identifier',promptDisplay:'Display name',promptMax:'Maximum output tokens',promptInputPrice:'Input USD per 1 million tokens. Leave blank if not configured.',promptOutputPrice:'Output USD per 1 million tokens. Leave blank if not configured.',promptProvider:'Provider numeric ID',promptUrl:'Base URL',promptAuth:'Authentication type: none, api_key, or bearer_token',promptCredential:'New stored credential. Leave blank to keep the current credential.'});
   const state={key:'',users:[],models:[],providers:[],filters:[],builtInPii:null,presets:[]};
+  const SECTION_LABELS=Object.freeze({
+    overview:'Overview',
+    users:'Users',
+    models:'Models',
+    providers:'Providers',
+    filters:'Filters',
+    stats:'Usage',
+  });
   const el=(id)=>document.getElementById(id);
   const actionButtons=new Map();
   let activeDialogTrigger=null;
@@ -21,7 +29,8 @@
   function money(value,configured){return configured?new Intl.NumberFormat(undefined,{style:'currency',currency:'USD',maximumFractionDigits:6}).format(value||0):T.notConfigured}
   async function api(path,options={}){const headers={'X-Admin-Key':state.key,...(options.headers||{})};if(options.body)headers['Content-Type']='application/json';const response=await fetch(path,{...options,headers});let body=null;try{body=await response.json()}catch{}if(!response.ok){if(response.status===401||response.status===403){state.key='';showLogin();showStatus(T.authFailed,'error')}const error=new Error(body&&body.error?body.error:T.requestFailed);error.status=response.status;throw error}return body}
   function showLogin(){el('login').classList.remove('hidden');el('dashboard').classList.add('hidden');el('admin-key').value=''}
-  function showDashboard(){el('login').classList.add('hidden');el('dashboard').classList.remove('hidden')}
+  function selectSection(name){document.querySelectorAll('nav [data-tab]').forEach((item)=>{if(item.dataset.tab===name)item.setAttribute('aria-current','page');else item.removeAttribute('aria-current')});Object.keys(SECTION_LABELS).forEach((sectionName)=>el('tab-'+sectionName).classList.toggle('hidden',sectionName!==name));el('section-title').textContent=SECTION_LABELS[name]}
+  function showDashboard(){el('login').classList.add('hidden');el('dashboard').classList.remove('hidden');selectSection('overview')}
   function button(text,handler,className){const item=node('button',text,className);item.type='button';item.addEventListener('click',handler);return item}
   function actionButton(key,text,handler,className){const item=button(text,handler,className);actionButtons.set(key,item);return item}
   function triggerReference(item,key=null,fallback=null){return{key,node:item,fallback}}
@@ -82,7 +91,7 @@
   function renderStats(stats){const summary=stats.summary,cards=node('div',undefined,'stats');[['Requests',number(summary.total_requests)],['Success',number(summary.successful_requests)],['Failure',number(summary.failed_requests)],['Error rate',`${Number(summary.error_rate).toFixed(1)}%`],['Input tokens',number(summary.total_input)],['Output tokens',number(summary.total_output)],['Total tokens',number(summary.total_tokens)],['Average response',`${number(Math.round(summary.average_response_time_ms))} ms`],['p95 response',`${number(summary.p95_response_time_ms)} ms`],['Estimated cost',money(summary.estimated_cost_usd,summary.cost_configured)]].forEach(([label,value])=>{const card=node('div',undefined,'metric');card.append(node('strong',value),node('span',label));cards.append(card)});cards.append(node('p',`${formatDate(stats.period.start)} – ${formatDate(stats.period.end)} · Updated ${formatDate(stats.generated_at)}`));el('stats-content').replaceChildren(cards);el('usage-content').replaceChildren(aggregateTable(stats.by_user,'User'));el('model-stats-content').replaceChildren(aggregateTable(stats.by_model,'Model'));el('provider-stats-content').replaceChildren(aggregateTable(stats.by_provider,'Provider'));const recent=stats.recent_requests.map((row)=>[formatDate(row.created_at),row.username||String(row.user_id),row.model_name,row.provider_id===null?'—':String(row.provider_id),row.status,row.error_type||'—',number(row.input_tokens),number(row.output_tokens),`${number(row.response_time_ms)} ms`,money(row.estimated_cost_usd,row.cost_configured)]);el('request-content').replaceChildren(table(['Time','User','Model','Provider ID','Status','Error type','Input','Output','Response','Estimated cost'],recent))}
   function populateProviders(){const select=el('model-form').elements.providerId;select.replaceChildren();state.providers.forEach((provider)=>{const option=node('option',`${provider.display_name} (${provider.provider_name})`);option.value=String(provider.id);select.append(option)})}
   function populatePresets(){const select=el('provider-form').elements.preset;select.replaceChildren();const custom=node('option','Custom');custom.value='';select.append(custom);state.presets.forEach((preset)=>{const option=node('option',preset.name);option.value=preset.id;select.append(option)})}
-  document.querySelectorAll('nav [data-tab]').forEach((item)=>item.addEventListener('click',()=>{document.querySelectorAll('nav [data-tab]').forEach((buttonItem)=>buttonItem.setAttribute('aria-selected',String(buttonItem===item)));['users','models','providers','filters','stats'].forEach((name)=>el(`tab-${name}`).classList.toggle('hidden',name!==item.dataset.tab))}));
+  document.querySelectorAll('nav [data-tab]').forEach((item)=>item.addEventListener('click',()=>selectSection(item.dataset.tab)));
   el('create-user').addEventListener('click',(event)=>openUserCreate(event.currentTarget));
   el('create-model').addEventListener('click',(event)=>openModelCreate(event.currentTarget));
   el('create-provider').addEventListener('click',(event)=>openProviderCreate(event.currentTarget));

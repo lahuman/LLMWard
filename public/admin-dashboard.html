@@ -7,28 +7,91 @@
   <link rel="stylesheet" href="/admin-dashboard.css">
 </head>
 <body>
-  <header><h1>LLM Gateway Administration</h1></header>
-  <main>
+  <main id="admin-app">
     <div id="status" class="status hidden" role="status" aria-live="polite"></div>
-    <section id="login" class="card">
-      <h2>Admin authentication</h2>
-      <form id="login-form"><label>Admin key <input id="admin-key" type="password" required autocomplete="current-password"></label><div><button type="submit">Sign in</button></div></form>
+    <section id="login" class="card login-panel" aria-labelledby="login-title">
+      <p class="eyebrow">GATEWAY CONTROL PLANE</p>
+      <h1 id="login-title">LLMWard Gateway</h1>
+      <p class="help">Administrator access is required to view Gateway configuration and usage.</p>
+      <form id="login-form">
+        <label for="admin-key">Admin key</label>
+        <input id="admin-key" type="password" required autocomplete="current-password">
+        <button type="submit">Sign in</button>
+      </form>
     </section>
     <div id="dashboard" class="hidden">
-      <nav aria-label="Administration sections">
-        <button type="button" data-tab="users" aria-selected="true">Users</button><button type="button" data-tab="models" aria-selected="false">Models</button><button type="button" data-tab="providers" aria-selected="false">Providers</button><button type="button" id="tab-button-filters" data-tab="filters" aria-selected="false" aria-controls="tab-filters">Filters</button><button type="button" data-tab="stats" aria-selected="false">Usage</button><button type="button" id="sign-out" class="secondary">Sign out</button>
-      </nav>
-      <section id="onboarding" class="card hidden"><h2>First-time setup</h2><div id="onboarding-content"></div></section>
-      <section id="tab-users">
+      <div class="app-shell">
+        <aside class="nav-rail" aria-label="LLMWard Gateway">
+          <div class="rail-brand">
+            <span class="brand-mark" aria-hidden="true">GW</span>
+            <span><strong>LLMWard</strong><small>Gateway control</small></span>
+          </div>
+          <nav class="rail-nav" aria-label="Administration sections">
+            <button id="tab-button-overview" type="button" data-tab="overview" aria-controls="tab-overview" aria-current="page">Overview</button>
+            <button id="tab-button-users" type="button" data-tab="users" aria-controls="tab-users">Users</button>
+            <button id="tab-button-models" type="button" data-tab="models" aria-controls="tab-models">Models</button>
+            <button id="tab-button-providers" type="button" data-tab="providers" aria-controls="tab-providers">Providers</button>
+            <button id="tab-button-filters" type="button" data-tab="filters" aria-controls="tab-filters">Filters</button>
+            <button id="tab-button-stats" type="button" data-tab="stats" aria-controls="tab-stats">Usage</button>
+          </nav>
+          <button id="sign-out" type="button" class="secondary rail-sign-out">Sign out</button>
+        </aside>
+        <div class="workspace">
+          <header class="workspace-header">
+            <p class="eyebrow">GATEWAY OPERATIONS</p>
+            <h1 id="section-title">Overview</h1>
+          </header>
+          <section id="tab-overview" class="page-section" aria-labelledby="tab-button-overview">
+            <section id="onboarding" class="card onboarding hidden" aria-labelledby="onboarding-title">
+              <h2 id="onboarding-title">First-time setup</h2>
+              <div id="onboarding-content"></div>
+            </section>
+            <section class="card" aria-labelledby="gateway-path-title">
+              <p class="eyebrow">GATEWAY PATH</p>
+              <h2 id="gateway-path-title">Effective access path</h2>
+              <div class="gateway-path" aria-label="Users, policies, models, and providers">
+                <button id="overview-users" class="gateway-node" type="button" data-overview-target="users" aria-controls="tab-users">
+                  <span class="node-index">01</span><span class="node-label">Users</span><strong id="overview-users-count">0</strong><span class="node-detail">tokens and quotas</span>
+                </button>
+                <span class="gateway-arrow" aria-hidden="true">?</span><span class="visually-hidden">then</span>
+                <button id="overview-policies" class="gateway-node" type="button" data-overview-target="filters" aria-controls="tab-filters">
+                  <span class="node-index">02</span><span class="node-label">Policies</span><strong id="overview-policies-count">0</strong><span class="node-detail">effective filters</span>
+                </button>
+                <span class="gateway-arrow" aria-hidden="true">?</span><span class="visually-hidden">then</span>
+                <button id="overview-models" class="gateway-node" type="button" data-overview-target="models" aria-controls="tab-models">
+                  <span class="node-index">03</span><span class="node-label">Models</span><strong id="overview-models-count">0</strong><span class="node-detail">available routes</span>
+                </button>
+                <span class="gateway-arrow" aria-hidden="true">?</span><span class="visually-hidden">then</span>
+                <button id="overview-providers" class="gateway-node" type="button" data-overview-target="providers" aria-controls="tab-providers">
+                  <span class="node-index">04</span><span class="node-label">Providers</span><strong id="overview-providers-count">0</strong><span class="node-detail">active registrations</span>
+                </button>
+              </div>
+            </section>
+            <div class="overview-grid">
+              <section class="card" aria-labelledby="overview-summary-title">
+                <h2 id="overview-summary-title">7-day operational summary</h2>
+                <div id="overview-stats-content"></div>
+              </section>
+              <section class="card" aria-labelledby="overview-provider-title">
+                <h2 id="overview-provider-title">Provider snapshot</h2>
+                <div id="overview-providers-content"></div>
+              </section>
+              <section class="card overview-activity" aria-labelledby="overview-activity-title">
+                <h2 id="overview-activity-title">Recent gateway activity</h2>
+                <div id="overview-activity-content"></div>
+              </section>
+            </div>
+          </section>
+          <section id="tab-users" class="page-section hidden" aria-labelledby="tab-button-users">
         <div class="card"><div class="section-heading"><h2>Users</h2><button id="create-user" type="button">Create user</button></div><div id="users-content"></div></div>
       </section>
-      <section id="tab-models" class="hidden">
+          <section id="tab-models" class="page-section hidden" aria-labelledby="tab-button-models">
         <div class="card"><div class="section-heading"><h2>Models</h2><button id="create-model" type="button">Create model</button></div><div id="models-content"></div></div>
       </section>
-      <section id="tab-providers" class="hidden">
+          <section id="tab-providers" class="page-section hidden" aria-labelledby="tab-button-providers">
         <div class="card"><div class="section-heading"><h2>Providers</h2><button id="create-provider" type="button">Create provider</button></div><div id="providers-content"></div></div>
       </section>
-      <section id="tab-filters" class="hidden" role="tabpanel" aria-labelledby="tab-button-filters">
+          <section id="tab-filters" class="page-section hidden" aria-labelledby="tab-button-filters">
         <section id="built-in-pii-filter" class="card" aria-labelledby="built-in-pii-title">
           <h2 id="built-in-pii-title">Built-in Korean PII &amp; Secret Filter</h2>
           <p class="help">Global for every model and inactive by default. Reviewed code defines the rules; the browser can only enable or disable them.</p>
@@ -69,7 +132,7 @@
         <div class="card"><h2 id="filter-form-title">Create filter</h2><form id="filter-form"><input name="filterId" type="hidden"><div class="grid"><label>Name <input name="name" required maxlength="100" aria-describedby="filter-name-help"></label><label>Input action <select name="inputAction"><option value="">None</option><option value="block" selected>Block</option><option value="mask">Mask</option></select></label><label>Output action <select name="outputAction"><option value="">None</option><option value="mask">Mask</option></select></label><label>Models <select name="modelIds" multiple size="5"></select></label></div><p id="filter-name-help" class="help">This non-sensitive, client-safe name is returned to API clients as <code>filter_name</code> when an input block policy matches.</p><label>Literal patterns (one per line) <textarea name="patterns" rows="7" required aria-describedby="filter-pattern-help"></textarea></label><p id="filter-pattern-help" class="help">Patterns are case-insensitive literals. They are stored in plaintext, so do not enter secrets, prompts, or response examples.</p><div class="checks"><label><input name="isGlobal" type="checkbox"> Apply globally</label><label><input name="isActive" type="checkbox"> Active</label></div><div class="actions"><button id="filter-submit" type="submit">Create filter</button><button id="filter-cancel" type="button" class="secondary hidden">Cancel edit</button></div></form></div>
         <div class="card"><h2>Filters</h2><div id="filters-content"></div></div>
       </section>
-      <section id="tab-stats" class="hidden">
+          <section id="tab-stats" class="page-section hidden" aria-labelledby="tab-button-stats">
         <div class="card"><h2>Statistics period</h2><form id="stats-form"><div class="grid"><label>Period <select name="range"><option value="today">Today</option><option value="7d" selected>Last 7 days</option><option value="30d">Last 30 days</option><option value="month">This month</option><option value="custom">Custom</option></select></label><label>Start (UTC) <input name="start" type="date"></label><label>End (UTC) <input name="end" type="date"></label></div><div><button type="submit">Apply</button></div></form></div>
         <div class="card"><h2>Usage summary</h2><div id="stats-content"></div></div>
         <div class="card"><h2>Usage by user</h2><div id="usage-content"></div></div>
@@ -77,6 +140,8 @@
         <div class="card"><h2>Usage by provider</h2><div id="provider-stats-content"></div></div>
         <div class="card"><h2>Recent requests (up to 100)</h2><div id="request-content"></div></div>
       </section>
+        </div>
+      </div>
     </div>
     <dialog id="user-dialog" aria-labelledby="user-dialog-title" aria-describedby="user-dialog-description">
       <h2 id="user-dialog-title">Create user</h2>

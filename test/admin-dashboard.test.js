@@ -252,9 +252,7 @@ function createDashboardHarness({
       if (!elements.has(id)) elements.set(id, new FakeNode());
       return elements.get(id);
     },
-    querySelectorAll() {
-      return [];
-    },
+    querySelectorAll: (selector) => selector === 'nav [data-tab]' ? navButtons : [],
     createElement(tagName) {
       const node = new FakeNode();
       node.tagName = String(tagName).toUpperCase();
@@ -266,6 +264,18 @@ function createDashboardHarness({
       return node;
     },
   };
+  const sectionNames = ['overview', 'users', 'models', 'providers', 'filters', 'stats'];
+  const tabs = {};
+  const navButtons = sectionNames.map((name) => {
+    const item = register('tab-button-' + name);
+    item.type = 'button';
+    item.dataset.tab = name;
+    item.setAttribute('aria-controls', 'tab-' + name);
+    tabs[name] = register('tab-' + name);
+    return item;
+  });
+  register('section-title');
+
   for (const id of ['user-dialog', 'model-dialog', 'provider-dialog', 'confirm-dialog']) register(id, new FakeDialog());
   register('confirm-form', new FakeForm());
   for (const id of [
@@ -360,6 +370,9 @@ function createDashboardHarness({
     login: document.getElementById('login'),
     dashboard: document.getElementById('dashboard'),
     signOut: document.getElementById('sign-out'),
+    navButtons,
+    sectionTitle: document.getElementById('section-title'),
+    tabs,
     userForm,
     modelForm,
     providerForm,
@@ -507,6 +520,33 @@ test('filters tab keeps the built-in PII filter before its sibling usage guide',
   const html = fs.readFileSync(path.join(__dirname, '..', 'public', 'admin-dashboard.html'), 'utf8');
   assert.match(html, /<section id="tab-filters"[^>]*>\s*<section id="built-in-pii-filter"[\s\S]*?<\/section>\s*<section id="filter-usage-guide"/);
 });
+test('Signal Grid shell labels the six ordered native navigation sections', () => {
+  const html = fs.readFileSync(path.join(__dirname, '..', 'public', 'admin-dashboard.html'), 'utf8');
+  const nav = html.match(/<nav class="rail-nav"[\s\S]*?<\/nav>/u);
+  assert.ok(nav);
+  assert.deepEqual([...nav[0].matchAll(/<button[^>]*data-tab="[^"]+"[^>]*>([^<]+)<\/button>/gu)].map((match) => match[1]), ['Overview', 'Users', 'Models', 'Providers', 'Filters', 'Usage']);
+  for (const name of ['overview', 'users', 'models', 'providers', 'filters', 'stats']) {
+    assert.match(nav[0], new RegExp(`<button id="tab-button-${name}"[^>]*aria-controls="tab-${name}"`));
+    assert.match(html, new RegExp(`<section id="tab-${name}"[^>]*aria-labelledby="tab-button-${name}"`));
+  }
+  assert.match(nav[0], /id="tab-button-overview"[^>]*aria-current="page"/);
+  assert.deepEqual([...nav[0].matchAll(/<button id="([^"]+)"[^>]*aria-current="page"/gu)].map((match) => match[1]), ['tab-button-overview']);
+  assert.doesNotMatch(nav[0], /aria-selected/);
+  assert.match(html, /<section id="tab-overview"[\s\S]*?<section id="onboarding"[\s\S]*?<div id="overview-stats-content"/);
+});
+
+test('Signal Grid navigation selects Filters after authentication', async () => {
+  const harness = createDashboardHarness({ loginKey: 'admin-key' });
+  await settle();
+  assert.equal(harness.tabs.overview.classList.contains('hidden'), false);
+  assert.equal(harness.navButtons.filter((item) => item.getAttribute('aria-current') === 'page').map((item) => item.dataset.tab).join(','), 'overview');
+  harness.navButtons.find((item) => item.dataset.tab === 'filters').dispatchEvent(new Event('click'));
+  assert.equal(harness.navButtons.filter((item) => item.getAttribute('aria-current') === 'page').map((item) => item.dataset.tab).join(','), 'filters');
+  assert.equal(harness.sectionTitle.textContent, 'Filters');
+  assert.equal(harness.tabs.filters.classList.contains('hidden'), false);
+  assert.equal(harness.tabs.overview.classList.contains('hidden'), true);
+});
+
 
 test('dashboard exposes labelled native resource and confirmation dialogs', () => {
   const html = fs.readFileSync(path.join(__dirname, '..', 'public', 'admin-dashboard.html'), 'utf8');
