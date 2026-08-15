@@ -1,7 +1,7 @@
 # Signal Grid Admin Redesign Design
 
 **Date:** 2026-08-14
-**Status:** Visual direction approved; written specification pending review
+**Status:** Approved
 **Selected concept:** B — Signal Grid
 
 ## Goal
