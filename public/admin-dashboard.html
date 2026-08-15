@@ -157,7 +157,7 @@
         <div class="dialog-actions"><button id="user-submit" type="submit">Create user</button><button id="user-cancel" type="button" class="secondary">Cancel</button></div>
       </form>
       <div id="user-dialog-status" class="status hidden" role="status" aria-live="polite"></div>
-      <section id="user-token-result" class="hidden" aria-labelledby="user-token-title">
+      <section id="user-token-result" class="warning-panel hidden" aria-labelledby="user-token-title">
         <h3 id="user-token-title">One-time token</h3>
         <p>This token cannot be retrieved again. Store it securely before closing.</p>
         <pre id="user-token-value"></pre>
@@ -223,7 +223,7 @@
       <p id="confirm-message"></p>
       <form id="confirm-form">
         <div id="confirm-dialog-status" class="status hidden" role="status" aria-live="polite"></div>
-        <div class="dialog-actions"><button id="confirm-submit" type="submit">Confirm</button><button id="confirm-cancel" type="button" class="secondary">Cancel</button></div>
+        <div class="dialog-actions"><button id="confirm-submit" type="submit" class="danger">Confirm</button><button id="confirm-cancel" type="button" class="secondary">Cancel</button></div>
       </form>
     </dialog>
   </main>

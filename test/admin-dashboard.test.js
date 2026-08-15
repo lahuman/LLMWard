@@ -386,6 +386,7 @@ function createDashboardHarness({
     usersContent: document.getElementById('users-content'),
     modelsContent: document.getElementById('models-content'),
     providersContent: document.getElementById('providers-content'),
+    filtersContent: document.getElementById('filters-content'),
     createUser: document.getElementById('create-user'),
     createModel: document.getElementById('create-model'),
     createProvider: document.getElementById('create-provider'),
@@ -426,6 +427,11 @@ function createDashboardHarness({
 
 function collectText(node) {
   return [node.textContent, ...node.children.flatMap(collectText)].filter(Boolean);
+}
+function findNodes(node, predicate) {
+  const matches = predicate(node) ? [node] : [];
+  for (const child of node.children) matches.push(...findNodes(child, predicate));
+  return matches;
 }
 
 function findButton(node, label) {
@@ -1545,6 +1551,36 @@ test('model table distinguishes Max output and Context', async () => {
   assert.ok(texts.includes('8,192'));
   assert.ok(texts.includes('Not configured'));
   assert.equal(texts.includes('Max tokens'), false);
+
+  const wrappers = findNodes(harness.modelsContent, (node) => node.classList.contains('table-wrap'));
+  assert.equal(wrappers.length, 1);
+  assert.equal(wrappers[0].tabIndex, 0);
+  assert.equal(wrappers[0].getAttribute('role'), 'region');
+  assert.equal(wrappers[0].getAttribute('aria-label'), 'Models');
+  const captions = findNodes(wrappers[0], (node) => node.tagName === 'CAPTION');
+  assert.deepEqual(captions.map((caption) => caption.textContent), ['Models']);
+  assert.ok(findNodes(wrappers[0], (node) => node.tagName === 'TH').every((cell) => cell.getAttribute('scope') === 'col'));
+});
+
+test('filter table states describe active scope and unassigned filters in text', async () => {
+  const filters = [
+    { id: 1, name: 'global', patterns: ['one'], input_action: 'block', output_action: null, is_active: true, is_global: true, model_ids: [], updated_at: '2026-08-15T00:00:00.000Z' },
+    { id: 2, name: 'scoped', patterns: ['two'], input_action: 'mask', output_action: null, is_active: true, is_global: false, model_ids: [31, 32], updated_at: '2026-08-15T00:00:00.000Z' },
+    { id: 3, name: 'inactive', patterns: ['three'], input_action: null, output_action: 'mask', is_active: false, is_global: false, model_ids: [31], updated_at: '2026-08-15T00:00:00.000Z' },
+    { id: 4, name: 'unassigned', patterns: ['four'], input_action: null, output_action: null, is_active: true, is_global: false, model_ids: [], updated_at: '2026-08-15T00:00:00.000Z' },
+  ];
+  const harness = createDashboardHarness({
+    loginKey: 'stored-admin-key',
+    fetchOverride(route) {
+      if (route === '/admin/filters') return response(filters);
+      return undefined;
+    },
+  });
+  await settle();
+
+  assert.deepEqual(findNodes(harness.filtersContent, (node) => node.classList.contains('badge')).map((badge) => badge.textContent), [
+    'Active globally', 'Active for 2 models', 'Inactive', 'Active but no models assigned',
+  ]);
 });
 
 test('model create serializes blank defaults as null and preserves numeric zero', async () => {
