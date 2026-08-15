@@ -460,6 +460,7 @@ function createDashboardHarness({
     sessionValues,
     get confirmCount() { return confirmCount; },
     get promptCount() { return promptCount; },
+    document,
     window: context.window,
   };
 }
@@ -487,6 +488,15 @@ function findButtons(node, label) {
   if (node.type === 'button' && node.textContent === label) matches.push(node);
   for (const child of node.children) matches.push(...findButtons(child, label));
   return matches;
+}
+
+function tabKeydown(shiftKey = false) {
+  const event = new Event('keydown', { cancelable: true });
+  Object.defineProperties(event, {
+    key: { value: 'Tab' },
+    shiftKey: { value: shiftKey },
+  });
+  return event;
 }
 
 async function settle() {
@@ -629,7 +639,7 @@ test('disabled text controls use distinct readable approved-token styling', () =
 
 test('all checkboxes reset the text-control box model', () => {
   const css = fs.readFileSync(path.join(__dirname, '..', 'public', 'admin-dashboard.css'), 'utf8');
-  assert.match(css, /input\[type="checkbox"\]\s*\{[^}]*width:\s*auto;[^}]*min-height:\s*auto;[^}]*padding:\s*0;[^}]*border:\s*0;[^}]*background:\s*transparent;/su);
+  assert.match(css, /input\[type="checkbox"\]\s*\{[^}]*width:\s*auto;[^}]*min-height:\s*auto;[^}]*padding:\s*0;[^}]*border:\s*0;[^}]*background:\s*transparent;[^}]*justify-self:\s*start;/su);
 });
 
 test('filters tab keeps the built-in PII filter before its sibling usage guide', () => {
@@ -732,15 +742,46 @@ test('initial seven-day statistics are shared by Overview and Usage', async () =
   assert.equal(collectText(harness.statsContent).includes('10'), true);
 });
 
-test('Overview uses explicit zero-request and unconfigured-cost states', async () => {
-  const harness = createDashboardHarness({ loginKey: 'admin-key' });
+test('empty statistics ignore the vacuous configured-cost flag in Overview and Usage', async () => {
+  const harness = createDashboardHarness({
+    loginKey: 'admin-key',
+    fetchOverride(route) {
+      if (route === '/admin/stats?range=7d') {
+        return response(dashboardStats({ summary: { total_requests: 0, estimated_cost_usd: 0, cost_configured: true } }));
+      }
+      return undefined;
+    },
+  });
   await settle();
 
-  const text = collectText(harness.overviewStatsContent);
-  assert.equal(text.filter((value) => value === 'No requests').length, 2);
-  assert.equal(text.includes('Not configured'), true);
-  assert.equal(text.includes('0.0%'), false);
-  assert.equal(text.includes('0 ms'), false);
+  const overviewText = collectText(harness.overviewStatsContent);
+  assert.equal(overviewText.filter((value) => value === 'No requests').length, 2);
+  assert.equal(overviewText.includes('0.0%'), false);
+  assert.equal(overviewText.includes('0 ms'), false);
+  for (const panel of [harness.overviewStatsContent, harness.statsContent]) {
+    const text = collectText(panel);
+    assert.equal(text.includes('Not configured'), true);
+    assert.equal(text.some((value) => value.includes('$')), false);
+  }
+});
+
+test('configured zero cost remains a valid USD value after a request', async () => {
+  const harness = createDashboardHarness({
+    loginKey: 'admin-key',
+    fetchOverride(route) {
+      if (route === '/admin/stats?range=7d') {
+        return response(dashboardStats({ summary: { total_requests: 1, successful_requests: 1, estimated_cost_usd: 0, cost_configured: true } }));
+      }
+      return undefined;
+    },
+  });
+  await settle();
+
+  for (const panel of [harness.overviewStatsContent, harness.statsContent]) {
+    const text = collectText(panel);
+    assert.equal(text.includes('Not configured'), false);
+    assert.equal(text.some((value) => value.includes('$') && value.includes('0')), true);
+  }
 });
 
 test('failed initial statistics stay local and Overview retry is deduplicated', async () => {
@@ -1131,6 +1172,53 @@ test('create dialogs reset forms focus the first control and restore focus on ca
   harness.providerCancel.dispatchEvent(new Event('click'));
   assert.equal(harness.createProvider.focusCount, 1);
   assert.equal(harness.confirmCount, 0);
+});
+
+test('dialog forward Tab skips disabled and hidden controls and wraps only at the last control', () => {
+  const harness = createDashboardHarness();
+  for (const dialog of [harness.userDialog, harness.modelDialog, harness.providerDialog, harness.confirmDialog]) {
+    const hiddenInput = Object.assign(new FakeNode(), { type: 'hidden' });
+    const first = new FakeNode();
+    const middle = new FakeNode();
+    const disabled = Object.assign(new FakeNode(), { disabled: true });
+    const hidden = new FakeNode();
+    const last = new FakeNode();
+    hidden.closest = () => hidden;
+    for (const control of [hiddenInput, first, middle, disabled, last]) control.closest = () => null;
+    dialog.querySelectorAll = () => [hiddenInput, first, middle, disabled, hidden, last];
+
+    harness.document.activeElement = middle;
+    const middleTab = tabKeydown();
+    dialog.dispatchEvent(middleTab);
+    assert.equal(middleTab.defaultPrevented, false);
+    assert.equal(first.focusCount, 0);
+
+    harness.document.activeElement = last;
+    const boundaryTab = tabKeydown();
+    dialog.dispatchEvent(boundaryTab);
+    assert.equal(boundaryTab.defaultPrevented, true);
+    assert.equal(first.focusCount, 1);
+  }
+});
+
+test('dialog Shift+Tab skips disabled and hidden controls and wraps at the first control', () => {
+  const harness = createDashboardHarness();
+  for (const dialog of [harness.userDialog, harness.modelDialog, harness.providerDialog, harness.confirmDialog]) {
+    const hiddenInput = Object.assign(new FakeNode(), { type: 'hidden' });
+    const first = new FakeNode();
+    const disabled = Object.assign(new FakeNode(), { disabled: true });
+    const hidden = new FakeNode();
+    const last = new FakeNode();
+    hidden.closest = () => hidden;
+    for (const control of [hiddenInput, first, disabled, last]) control.closest = () => null;
+    dialog.querySelectorAll = () => [hiddenInput, first, disabled, hidden, last];
+
+    harness.document.activeElement = first;
+    const event = tabKeydown(true);
+    dialog.dispatchEvent(event);
+    assert.equal(event.defaultPrevented, true);
+    assert.equal(last.focusCount, 1);
+  }
 });
 
 test('backdrop clicks do not discard resource forms', () => {
