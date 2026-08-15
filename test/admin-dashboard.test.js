@@ -504,23 +504,25 @@ function tabKeydown(shiftKey = false) {
   return event;
 }
 
-function pendingModelDialogFocusables(harness) {
+function pendingModelDialogFocusables(harness, { detailsOpen = false } = {}) {
   const hiddenInput = Object.assign(new FakeNode(), { type: 'hidden' });
   const first = new FakeNode();
   const summary = new FakeNode();
-  const closedDetailsInput = Object.assign(new FakeNode(), { rendered: false });
-  for (const control of [hiddenInput, first, summary, closedDetailsInput]) control.closest = () => null;
+  const detailsInput = new FakeNode();
+  const closedDetailsContent = new FakeNode();
+  for (const control of [hiddenInput, first, summary]) control.closest = () => null;
+  detailsInput.closest = (selector) => !detailsOpen && selector === 'details:not([open]) > :not(summary)' ? closedDetailsContent : null;
   harness.modelSubmit.disabled = true;
   harness.modelCancel.disabled = true;
   harness.modelDialog.querySelectorAll = (selector) => [
     hiddenInput,
     first,
     ...(selector.includes('summary') ? [summary] : []),
-    closedDetailsInput,
+    detailsInput,
     harness.modelSubmit,
     harness.modelCancel,
   ];
-  return { first, summary, closedDetailsInput };
+  return { first, summary, detailsInput };
 }
 
 async function settle() {
@@ -1247,7 +1249,8 @@ test('dialog Shift+Tab skips disabled and hidden controls and wraps at the first
 
 test('pending model dialog forward Tab wraps from the closed-details summary', () => {
   const harness = createDashboardHarness();
-  const { first, summary, closedDetailsInput } = pendingModelDialogFocusables(harness);
+  const { first, summary, detailsInput } = pendingModelDialogFocusables(harness);
+  assert.equal(detailsInput.getClientRects().length, 1);
   harness.document.activeElement = summary;
 
   const event = tabKeydown();
@@ -1255,12 +1258,13 @@ test('pending model dialog forward Tab wraps from the closed-details summary', (
 
   assert.equal(event.defaultPrevented, true);
   assert.equal(first.focusCount, 1);
-  assert.equal(closedDetailsInput.focusCount, 0);
+  assert.equal(detailsInput.focusCount, 0);
 });
 
 test('pending model dialog Shift+Tab wraps to the closed-details summary', () => {
   const harness = createDashboardHarness();
-  const { first, summary, closedDetailsInput } = pendingModelDialogFocusables(harness);
+  const { first, summary, detailsInput } = pendingModelDialogFocusables(harness);
+  assert.equal(detailsInput.getClientRects().length, 1);
   harness.document.activeElement = first;
 
   const event = tabKeydown(true);
@@ -1268,7 +1272,26 @@ test('pending model dialog Shift+Tab wraps to the closed-details summary', () =>
 
   assert.equal(event.defaultPrevented, true);
   assert.equal(summary.focusCount, 1);
-  assert.equal(closedDetailsInput.focusCount, 0);
+  assert.equal(detailsInput.focusCount, 0);
+});
+
+test('pending model dialog keeps open-details inputs in the focus order', () => {
+  const harness = createDashboardHarness();
+  const { first, summary, detailsInput } = pendingModelDialogFocusables(harness, { detailsOpen: true });
+  assert.equal(detailsInput.getClientRects().length, 1);
+
+  harness.document.activeElement = detailsInput;
+  const forward = tabKeydown();
+  harness.modelDialog.dispatchEvent(forward);
+  assert.equal(forward.defaultPrevented, true);
+  assert.equal(first.focusCount, 1);
+
+  harness.document.activeElement = first;
+  const backward = tabKeydown(true);
+  harness.modelDialog.dispatchEvent(backward);
+  assert.equal(backward.defaultPrevented, true);
+  assert.equal(detailsInput.focusCount, 1);
+  assert.equal(summary.focusCount, 0);
 });
 
 test('backdrop clicks do not discard resource forms', () => {

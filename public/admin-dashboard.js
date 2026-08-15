@@ -54,7 +54,7 @@
   function handleDialogClose(statusId,cleanup){const reference=activeDialogTrigger,restoreFocus=restoreDialogFocusOnClose;activeDialogTrigger=null;restoreDialogFocusOnClose=true;clearDialogStatus(statusId);cleanup();if(restoreFocus)focusTrigger(reference)}
   function containDialogTab(event){
     if(event.key!=='Tab')return;
-    const focusable=Array.from(event.currentTarget.querySelectorAll('a[href],button,input,select,summary,textarea,[tabindex]:not([tabindex="-1"])')).filter((control)=>control.type!=='hidden'&&!control.disabled&&!control.hidden&&!control.closest('.hidden')&&control.getClientRects().length);
+    const focusable=Array.from(event.currentTarget.querySelectorAll('a[href],button,input,select,summary,textarea,[tabindex]:not([tabindex="-1"])')).filter((control)=>control.type!=='hidden'&&!control.disabled&&!control.hidden&&!control.closest('.hidden')&&!control.closest('details:not([open]) > :not(summary)')&&control.getClientRects().length);
     if(!focusable.length)return;
     const first=focusable[0],last=focusable[focusable.length-1];
     if(event.shiftKey&&document.activeElement===first){event.preventDefault();last.focus()}
