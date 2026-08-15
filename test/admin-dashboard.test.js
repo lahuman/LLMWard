@@ -237,9 +237,15 @@ function createDashboardHarness({
   control(providerForm, 'envName');
   control(providerForm, 'storedKey', { type: 'password' });
   control(providerForm, 'removeStoredKey', { type: 'checkbox' });
-  const filterForm = new FakeForm();
-  filterForm.elements.modelIds = Object.assign(new FakeNode(), { multiple: true });
-  filterForm.elements.isGlobal = new FakeNode();
+  const filterForm = register('filter-form', new FakeForm());
+  control(filterForm, 'filterId');
+  control(filterForm, 'name');
+  control(filterForm, 'patterns');
+  control(filterForm, 'inputAction', { value: 'block' });
+  control(filterForm, 'outputAction', { value: 'block' });
+  control(filterForm, 'modelIds', { multiple: true });
+  control(filterForm, 'isGlobal', { type: 'checkbox' });
+  control(filterForm, 'isActive', { type: 'checkbox' });
   const statsForm = new FakeForm({ range: '7d', start: '', end: '' });
   const requests = [];
   const clipboardWrites = [];
@@ -407,6 +413,7 @@ function createDashboardHarness({
     userForm,
     modelForm,
     providerForm,
+    filterForm,
     requests,
     status: document.getElementById('status'),
     builtInPiiForm,
@@ -425,6 +432,8 @@ function createDashboardHarness({
     overviewProvidersContent: document.getElementById('overview-providers-content'),
     overviewStatsContent: document.getElementById('overview-stats-content'),
     overviewActivityContent: document.getElementById('overview-activity-content'),
+    onboarding: document.getElementById('onboarding'),
+    onboardingContent: document.getElementById('onboarding-content'),
     statsForm,
     statsContent: document.getElementById('stats-content'),
     usageContent: document.getElementById('usage-content'),
@@ -529,6 +538,11 @@ async function settle() {
   await new Promise((resolve) => setImmediate(resolve));
   await new Promise((resolve) => setImmediate(resolve));
 }
+function signIn(harness, key) {
+  harness.adminKey.value = key;
+  harness.loginForm.dispatchEvent(new Event('submit', { cancelable: true }));
+}
+
 
 function dashboardModel(overrides = {}) {
   return {
@@ -1657,6 +1671,416 @@ test('sign out clears the in-memory session and returns to login', async () => {
   assert.equal(harness.dashboard.classList.contains('hidden'), true);
   assert.equal(harness.adminKey.value, '');
   assert.deepEqual(harness.storageCalls, []);
+});
+test('administrator session sign-out clears configuration and sensitive forms before relogin finishes', async () => {
+  const nextProviders = deferred();
+  const oldProvider = dashboardProvider({ display_name: 'Old configuration' });
+  const newProvider = dashboardProvider({ display_name: 'New configuration' });
+  const harness = createDashboardHarness({
+    loginKey: 'old-session-key',
+    fetchOverride(route, options) {
+      if (route === '/admin/providers') {
+        return options.headers['X-Admin-Key'] === 'new-session-key'
+          ? nextProviders.promise
+          : response([oldProvider]);
+      }
+      return undefined;
+    },
+  });
+  await settle();
+
+  findButton(harness.providersContent, 'Edit').dispatchEvent(new Event('click'));
+  harness.providerForm.elements.storedKey.value = 'replacement-credential';
+  harness.filterForm.elements.name.value = 'private-patterns';
+  harness.filterForm.elements.patterns.value = 'literal-one\nliteral-two';
+  assert.equal(collectText(harness.providersContent).includes('Old configuration'), true);
+  assert.equal(harness.providerDialog.open, true);
+
+  harness.signOut.dispatchEvent(new Event('click'));
+
+  assert.equal(harness.providerDialog.open, false);
+  assert.equal(harness.providerForm.elements.storedKey.value, '');
+  assert.equal(harness.filterForm.elements.name.value, '');
+  assert.equal(harness.filterForm.elements.patterns.value, '');
+  for (const container of [
+    harness.usersContent,
+    harness.modelsContent,
+    harness.providersContent,
+    harness.filtersContent,
+    harness.overviewProvidersContent,
+    harness.builtInPiiRules,
+    harness.onboardingContent,
+  ]) assert.equal(container.children.length, 0);
+  for (const count of [
+    harness.overviewUsersCount,
+    harness.overviewPoliciesCount,
+    harness.overviewModelsCount,
+    harness.overviewProvidersCount,
+  ]) assert.equal(count.textContent, '');
+  assert.equal(harness.modelForm.elements.providerId.children.length, 0);
+  assert.equal(harness.providerForm.elements.preset.children.length, 0);
+  assert.equal(harness.filterForm.elements.modelIds.children.length, 0);
+  assert.equal(harness.onboarding.classList.contains('hidden'), true);
+  assert.equal(harness.status.textContent, 'Signed out.');
+  assert.equal(harness.status.className, 'status success');
+
+  signIn(harness, 'new-session-key');
+  await settle();
+  assert.equal(collectText(harness.providersContent).includes('Old configuration'), false);
+
+  nextProviders.resolve(response([newProvider]));
+  await settle();
+  assert.equal(collectText(harness.providersContent).includes('New configuration'), true);
+});
+
+test('administrator session ignores delayed configuration success after sign-out', async () => {
+  const oldProviders = deferred();
+  const harness = createDashboardHarness({
+    loginKey: 'old-session-key',
+    fetchOverride(route) {
+      if (route === '/admin/providers') return oldProviders.promise;
+      return undefined;
+    },
+  });
+  await settle();
+
+  harness.signOut.dispatchEvent(new Event('click'));
+  oldProviders.resolve(response([dashboardProvider({ display_name: 'Stale configuration' })]));
+  await settle();
+
+  assert.equal(harness.dashboard.classList.contains('hidden'), true);
+  assert.equal(harness.providersContent.children.length, 0);
+  assert.equal(harness.overviewProvidersContent.children.length, 0);
+  assert.equal(harness.status.textContent, 'Signed out.');
+  assert.equal(harness.status.className, 'status success');
+});
+
+test('administrator session ignores delayed configuration success after same-key relogin', async () => {
+  const oldProviders = deferred();
+  let providerLoads = 0;
+  const harness = createDashboardHarness({
+    loginKey: 'reused-admin-key',
+    fetchOverride(route) {
+      if (route !== '/admin/providers') return undefined;
+      providerLoads += 1;
+      if (providerLoads === 1) return oldProviders.promise;
+      return response([dashboardProvider({ display_name: 'New session configuration' })]);
+    },
+  });
+  await settle();
+
+  harness.signOut.dispatchEvent(new Event('click'));
+  signIn(harness, 'reused-admin-key');
+  await settle();
+  assert.equal(collectText(harness.providersContent).includes('New session configuration'), true);
+
+  oldProviders.resolve(response([dashboardProvider({ display_name: 'Old session configuration' })]));
+  await settle();
+
+  const rendered = collectText(harness.providersContent);
+  assert.equal(rendered.includes('New session configuration'), true);
+  assert.equal(rendered.includes('Old session configuration'), false);
+  assert.equal(harness.dashboard.classList.contains('hidden'), false);
+});
+
+test('administrator session ignores delayed old-session 401 after different-key and same-key relogin', async () => {
+  for (const newKey of ['new-admin-key', 'old-admin-key']) {
+    const oldProviders = deferred();
+    let providerLoads = 0;
+    const harness = createDashboardHarness({
+      loginKey: 'old-admin-key',
+      fetchOverride(route) {
+        if (route !== '/admin/providers') return undefined;
+        providerLoads += 1;
+        if (providerLoads === 1) return oldProviders.promise;
+        return response([dashboardProvider({ display_name: 'Current session provider' })]);
+      },
+    });
+    await settle();
+
+    harness.signOut.dispatchEvent(new Event('click'));
+    signIn(harness, newKey);
+    await settle();
+    oldProviders.resolve(errorResponse(401, 'old session expired'));
+    await settle();
+
+    assert.equal(harness.login.classList.contains('hidden'), true);
+    assert.equal(harness.dashboard.classList.contains('hidden'), false);
+    assert.equal(collectText(harness.providersContent).includes('Current session provider'), true);
+    assert.notEqual(harness.status.textContent, 'Authentication failed. The admin key was cleared.');
+  }
+});
+
+test('administrator session ignores delayed configuration failure without overwriting new status', async () => {
+  const oldProviders = deferred();
+  let providerLoads = 0;
+  const harness = createDashboardHarness({
+    loginKey: 'old-admin-key',
+    fetchOverride(route) {
+      if (route === '/admin/providers') {
+        providerLoads += 1;
+        if (providerLoads === 1) return oldProviders.promise;
+        return response([dashboardProvider({ display_name: 'Current provider' })]);
+      }
+      if (route === '/admin/providers/7/discover-models') return response([]);
+      return undefined;
+    },
+  });
+  await settle();
+
+  harness.signOut.dispatchEvent(new Event('click'));
+  signIn(harness, 'new-admin-key');
+  await settle();
+  findButton(harness.providersContent, 'Discover models').dispatchEvent(new Event('click'));
+  await settle();
+  assert.equal(harness.status.textContent, 'No unregistered models were found.');
+
+  oldProviders.resolve(errorResponse(500, 'stale configuration failure'));
+  await settle();
+
+  assert.equal(harness.status.textContent, 'No unregistered models were found.');
+  assert.equal(harness.status.className, 'status success');
+  assert.equal(collectText(harness.providersContent).includes('Current provider'), true);
+});
+
+
+
+
+test('administrator session current authentication failure closes dialogs and scrubs credentials', async () => {
+  const provider = dashboardProvider({
+    auth_type: 'api_key',
+    hasApiKey: true,
+    display_name: 'Credential provider',
+  });
+  const harness = createDashboardHarness({
+    loginKey: 'current-admin-key',
+    fetchOverride(route) {
+      if (route === '/admin/providers') return response([provider]);
+      if (route.includes('/admin/stats?') && route.includes('range=30d')) {
+        return errorResponse(401, 'current session expired');
+      }
+      return undefined;
+    },
+  });
+  await settle();
+
+  findButton(harness.providersContent, 'Edit').dispatchEvent(new Event('click'));
+  harness.providerForm.elements.storedKey.value = 'replacement-credential';
+  harness.filterForm.elements.patterns.value = 'private-pattern';
+  harness.statsForm.values.range = '30d';
+  harness.statsForm.dispatchEvent(new Event('submit', { cancelable: true }));
+  await settle();
+
+  assert.equal(harness.login.classList.contains('hidden'), false);
+  assert.equal(harness.dashboard.classList.contains('hidden'), true);
+  assert.equal(harness.providerDialog.open, false);
+  assert.equal(harness.providerForm.elements.storedKey.value, '');
+  assert.equal(harness.filterForm.elements.patterns.value, '');
+  assert.equal(harness.userTokenValue.textContent, '');
+  assert.equal(harness.providersContent.children.length, 0);
+  assert.equal(harness.status.textContent, 'Authentication failed. The admin key was cleared.');
+  assert.equal(harness.status.className, 'status error');
+});
+
+test('administrator session invalidates a delayed provider mutation across relogin', async () => {
+  const mutation = deferred();
+  const oldProvider = dashboardProvider({ display_name: 'Old provider' });
+  const newProvider = dashboardProvider({ display_name: 'New provider' });
+  const harness = createDashboardHarness({
+    loginKey: 'old-admin-key',
+    fetchOverride(route, options) {
+      if (route === '/admin/providers' && !options.method) {
+        return response([
+          options.headers['X-Admin-Key'] === 'new-admin-key' ? newProvider : oldProvider,
+        ]);
+      }
+      if (route === '/admin/providers/7' && options.method === 'PUT') return mutation.promise;
+      if (route === '/admin/providers/7/discover-models') return response([]);
+      return undefined;
+    },
+  });
+  await settle();
+
+  findButton(harness.providersContent, 'Edit').dispatchEvent(new Event('click'));
+  harness.providerForm.elements.displayName.value = 'Pending old mutation';
+  harness.providerForm.elements.storedKey.value = 'pending-credential';
+  harness.providerForm.dispatchEvent(new Event('submit', { cancelable: true }));
+  await settle();
+
+  harness.signOut.dispatchEvent(new Event('click'));
+  assert.equal(harness.providerDialog.open, false);
+  assert.equal(harness.providerForm.elements.storedKey.value, '');
+  signIn(harness, 'new-admin-key');
+  await settle();
+  findButton(harness.providersContent, 'Discover models').dispatchEvent(new Event('click'));
+  await settle();
+  const newProviderLoads = harness.requests.filter(({ route, options }) =>
+    route === '/admin/providers'
+      && !options.method
+      && options.headers['X-Admin-Key'] === 'new-admin-key').length;
+  assert.equal(harness.status.textContent, 'No unregistered models were found.');
+
+  mutation.resolve(response(oldProvider));
+  await settle();
+
+  assert.equal(harness.status.textContent, 'No unregistered models were found.');
+  assert.equal(harness.status.className, 'status success');
+  assert.equal(collectText(harness.providersContent).includes('New provider'), true);
+  assert.equal(harness.requests.filter(({ route, options }) =>
+    route === '/admin/providers'
+      && !options.method
+      && options.headers['X-Admin-Key'] === 'new-admin-key').length, newProviderLoads);
+});
+
+test('administrator session invalidates delayed provider discovery across relogin', async () => {
+  const discovery = deferred();
+  const harness = createDashboardHarness({
+    loginKey: 'old-admin-key',
+    fetchOverride(route, options) {
+      if (route === '/admin/providers') {
+        const label = options.headers['X-Admin-Key'] === 'new-admin-key' ? 'New provider' : 'Old provider';
+        return response([dashboardProvider({ display_name: label })]);
+      }
+      if (route === '/admin/providers/7/discover-models') return discovery.promise;
+      return undefined;
+    },
+  });
+  await settle();
+
+  findButton(harness.providersContent, 'Discover models').dispatchEvent(new Event('click'));
+  await settle();
+  harness.signOut.dispatchEvent(new Event('click'));
+  signIn(harness, 'new-admin-key');
+  await settle();
+
+  discovery.resolve(response([{ model_name: 'stale-discovered-model' }]));
+  await settle();
+
+  assert.equal(harness.modelDialog.open, false);
+  assert.equal(harness.modelDiscovery.classList.contains('hidden'), true);
+  assert.equal(harness.modelDiscoveryList.children.length, 0);
+  assert.equal(harness.modelForm.elements.modelName.value, '');
+  assert.equal(harness.modelForm.elements.displayName.value, '');
+  assert.equal(collectText(harness.providersContent).includes('New provider'), true);
+});
+
+test('administrator session hides a created token when configuration refresh returns 401', async () => {
+  const token = 'new-user-one-time-token';
+  let userLoads = 0;
+  const harness = createDashboardHarness({
+    loginKey: 'current-admin-key',
+    fetchOverride(route, options) {
+      if (route === '/admin/users' && options.method === 'POST') return response({ apiToken: token });
+      if (route === '/admin/users' && !options.method) {
+        userLoads += 1;
+        return userLoads === 1
+          ? response([])
+          : errorResponse(401, 'refresh authentication expired');
+      }
+      return undefined;
+    },
+  });
+  await settle();
+
+  harness.createUser.dispatchEvent(new Event('click'));
+  harness.userForm.elements.username.value = 'alice';
+  harness.userForm.dispatchEvent(new Event('submit', { cancelable: true }));
+  await settle();
+
+  assert.equal(harness.login.classList.contains('hidden'), false);
+  assert.equal(harness.dashboard.classList.contains('hidden'), true);
+  assert.equal(harness.userDialog.open, false);
+  assert.equal(harness.userTokenResult.classList.contains('hidden'), true);
+  assert.equal(harness.userTokenValue.textContent, '');
+  assert.equal(harness.status.textContent, 'Authentication failed. The admin key was cleared.');
+  assert.equal(collectText(harness.userDialog).includes(token), false);
+});
+
+test('administrator session hides a rotated token when configuration refresh returns 401', async () => {
+  const token = 'rotated-one-time-token';
+  let userLoads = 0;
+  const user = {
+    id: 7,
+    username: 'alice',
+    is_active: true,
+    max_daily_input_tokens: 0,
+    max_daily_output_tokens: 0,
+    permissions_valid: true,
+    allowed_models: [],
+    created_at: '2026-08-13T00:00:00.000Z',
+  };
+  const harness = createDashboardHarness({
+    loginKey: 'current-admin-key',
+    fetchOverride(route, options) {
+      if (route === '/admin/users/7/rotate-token' && options.method === 'POST') {
+        return response({ apiToken: token });
+      }
+      if (route === '/admin/users' && !options.method) {
+        userLoads += 1;
+        return userLoads === 1
+          ? response([user])
+          : errorResponse(401, 'refresh authentication expired');
+      }
+      return undefined;
+    },
+  });
+  await settle();
+
+  findButton(harness.usersContent, 'Rotate token').dispatchEvent(new Event('click'));
+  harness.confirmForm.dispatchEvent(new Event('submit', { cancelable: true }));
+  await settle();
+
+  assert.equal(harness.login.classList.contains('hidden'), false);
+  assert.equal(harness.dashboard.classList.contains('hidden'), true);
+  assert.equal(harness.confirmDialog.open, false);
+  assert.equal(harness.userDialog.open, false);
+  assert.equal(harness.userTokenResult.classList.contains('hidden'), true);
+  assert.equal(harness.userTokenValue.textContent, '');
+  assert.equal(harness.status.textContent, 'Authentication failed. The admin key was cleared.');
+  assert.equal(collectText(harness.userDialog).includes(token), false);
+});
+
+test('administrator session still shows a rotated token after a current non-auth refresh failure', async () => {
+  const token = 'rotated-one-time-token';
+  let userLoads = 0;
+  const user = {
+    id: 7,
+    username: 'alice',
+    is_active: true,
+    max_daily_input_tokens: 0,
+    max_daily_output_tokens: 0,
+    permissions_valid: true,
+    allowed_models: [],
+    created_at: '2026-08-13T00:00:00.000Z',
+  };
+  const harness = createDashboardHarness({
+    loginKey: 'current-admin-key',
+    fetchOverride(route, options) {
+      if (route === '/admin/users/7/rotate-token' && options.method === 'POST') {
+        return response({ apiToken: token });
+      }
+      if (route === '/admin/users' && !options.method) {
+        userLoads += 1;
+        return userLoads === 1
+          ? response([user])
+          : errorResponse(500, 'current refresh failed');
+      }
+      return undefined;
+    },
+  });
+  await settle();
+
+  findButton(harness.usersContent, 'Rotate token').dispatchEvent(new Event('click'));
+  harness.confirmForm.dispatchEvent(new Event('submit', { cancelable: true }));
+  await settle();
+
+  assert.equal(harness.login.classList.contains('hidden'), true);
+  assert.equal(harness.dashboard.classList.contains('hidden'), false);
+  assert.equal(harness.userDialog.open, true);
+  assert.equal(harness.userTokenResult.classList.contains('hidden'), false);
+  assert.equal(harness.userTokenValue.textContent, token);
+  assert.equal(harness.status.textContent, 'current refresh failed');
+  assert.equal(harness.status.className, 'status error');
 });
 
 

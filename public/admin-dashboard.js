@@ -1,6 +1,6 @@
   'use strict';
   const T=Object.freeze({loading:'Loading…',empty:'No records found.',notConfigured:'Not configured',signedIn:'Signed in.',signedOut:'Signed out.',saved:'Changes saved.',created:'Created successfully.',rotated:'Token rotated. The previous token is now invalid.',authFailed:'Authentication failed. The admin key was cleared.',requestFailed:'Request failed.',confirmRotate:'Rotate this user token? The previous token will stop working immediately.',confirmDeleteModel:'Delete this model permanently?',confirmDeleteProvider:'Delete this provider permanently?',promptInput:'Daily input quota (0 = unlimited)',promptOutput:'Daily output quota (0 = unlimited)',promptModels:'Allowed model identifiers separated by commas. Leave blank for all models.',promptIdentifier:'Identifier',promptDisplay:'Display name',promptMax:'Maximum output tokens',promptInputPrice:'Input USD per 1 million tokens. Leave blank if not configured.',promptOutputPrice:'Output USD per 1 million tokens. Leave blank if not configured.',promptProvider:'Provider numeric ID',promptUrl:'Base URL',promptAuth:'Authentication type: none, api_key, or bearer_token',promptCredential:'New stored credential. Leave blank to keep the current credential.'});
-  const state={key:'',users:[],models:[],providers:[],filters:[],builtInPii:null,presets:[],sevenDayStats:null,sevenDayStatsError:'',sevenDayStatsRequest:null,usageStats:null,usageHasAppliedRange:false,statisticsGeneration:0};
+  const state={key:'',sessionGeneration:0,users:[],models:[],providers:[],filters:[],builtInPii:null,presets:[],sevenDayStats:null,sevenDayStatsError:'',sevenDayStatsRequest:null,usageStats:null,usageHasAppliedRange:false,statisticsGeneration:0};
   const SECTION_LABELS=Object.freeze({
     overview:'Overview',
     users:'Users',
@@ -32,9 +32,88 @@
   function successRate(summary){if(!summary.total_requests)return 'No requests';return((summary.successful_requests/summary.total_requests)*100).toFixed(1)+'%'}
   function p95Response(summary){return summary.total_requests?number(summary.p95_response_time_ms)+' ms':'No requests'}
   function panelError(message){const result=node('div',undefined,'panel-state error');result.append(node('strong','Statistics unavailable'),node('p',message));return result}
-  async function api(path,options={}){const headers={'X-Admin-Key':state.key,...(options.headers||{})};if(options.body)headers['Content-Type']='application/json';const response=await fetch(path,{...options,headers});let body=null;try{body=await response.json()}catch{}if(!response.ok){if(response.status===401||response.status===403){state.key='';showLogin();showStatus(T.authFailed,'error')}const error=new Error(body&&body.error?body.error:T.requestFailed);error.status=response.status;throw error}return body}
+  function sessionSnapshot(){return{key:state.key,generation:state.sessionGeneration}}
+  function isCurrentSession(request){return state.key===request.key&&state.sessionGeneration===request.generation}
+  function staleSessionError(){const error=new Error(T.requestFailed);error.staleSession=true;return error}
+  function isIgnoredAsyncError(error){return Boolean(error&&(error.staleSession||error.authenticationHandled))}
+  async function api(path,options={}){
+    const request=sessionSnapshot(),headers={'X-Admin-Key':request.key,...(options.headers||{})};
+    if(options.body)headers['Content-Type']='application/json';
+    let response;
+    try{response=await fetch(path,{...options,headers})}
+    catch(error){if(!isCurrentSession(request))throw staleSessionError();throw error}
+    let body=null;
+    try{body=await response.json()}catch{}
+    if(!isCurrentSession(request))throw staleSessionError();
+    if(!response.ok){
+      const error=new Error(body&&body.error?body.error:T.requestFailed);
+      error.status=response.status;
+      if(isAuthenticationError(error)){error.authenticationHandled=true;endSession(T.authFailed,'error')}
+      throw error;
+    }
+    return body;
+  }
   function resetStatisticsState(){state.statisticsGeneration+=1;state.sevenDayStats=null;state.sevenDayStatsError='';state.sevenDayStatsRequest=null;state.usageStats=null;state.usageHasAppliedRange=false;for(const id of ['overview-stats-content','overview-activity-content','stats-content','usage-content','model-stats-content','provider-stats-content','request-content'])el(id).replaceChildren()}
-  function showLogin(){resetStatisticsState();el('login').classList.remove('hidden');el('dashboard').classList.add('hidden');el('admin-key').value=''}
+  function resetSessionState(){
+    resetStatisticsState();
+    state.users=[];
+    state.models=[];
+    state.providers=[];
+    state.filters=[];
+    state.builtInPii=null;
+    state.presets=[];
+    pendingConfirmation=null;
+    pendingUserOperation=null;
+    pendingConfirmationOperation=null;
+    pendingModelOperation=null;
+    pendingProviderOperation=null;
+    pendingDiscoveryRequest=null;
+    discovery=null;
+    actionButtons.clear();
+    for(const id of ['user-dialog','model-dialog','provider-dialog','confirm-dialog']){
+      const dialog=el(id);
+      if(dialog.open)closeDialog(dialog,false);
+    }
+    activeDialogTrigger=null;
+    restoreDialogFocusOnClose=true;
+    const userForm=el('user-form');
+    userForm.reset();
+    userForm.elements.username.disabled=false;
+    userForm.classList.remove('hidden');
+    el('user-token-value').textContent='';
+    el('user-token-result').classList.add('hidden');
+    const modelForm=el('model-form');
+    modelForm.reset();
+    resetModelDiscovery();
+    el('model-advanced').open=false;
+    const providerForm=el('provider-form');
+    providerForm.reset();
+    providerForm.elements.storedKey.value='';
+    providerForm.elements.storedKey.disabled=false;
+    providerForm.elements.removeStoredKey.checked=false;
+    providerForm.elements.removeStoredKey.disabled=false;
+    resetFilterForm();
+    el('built-in-pii-form').reset();
+    el('confirm-form').reset();
+    setUserPending(false);
+    setModelPending(false);
+    setProviderPending(false);
+    setConfirmationPending(false);
+    for(const id of ['user-dialog-status','model-dialog-status','provider-dialog-status','confirm-dialog-status'])clearDialogStatus(id);
+    for(const id of ['users-content','models-content','providers-content','filters-content','overview-providers-content','built-in-pii-rules','onboarding-content'])el(id).replaceChildren();
+    for(const name of ['users','policies','models','providers'])el('overview-'+name+'-count').textContent='';
+    el('built-in-pii-state').textContent='';
+    el('built-in-pii-state').className='badge';
+    el('onboarding').classList.add('hidden');
+    modelForm.elements.providerId.replaceChildren();
+    providerForm.elements.preset.replaceChildren();
+    el('filter-form').elements.modelIds.replaceChildren();
+    el('confirm-title').textContent='';
+    el('confirm-message').textContent='';
+  }
+  function beginSession(key){state.sessionGeneration+=1;state.key=key;resetSessionState()}
+  function endSession(message,kind){state.sessionGeneration+=1;state.key='';resetSessionState();showLogin();if(message)showStatus(message,kind)}
+  function showLogin(){el('login').classList.remove('hidden');el('dashboard').classList.add('hidden');el('admin-key').value=''}
   function selectSection(name){document.querySelectorAll('nav [data-tab]').forEach((item)=>{if(item.dataset.tab===name)item.setAttribute('aria-current','page');else item.removeAttribute('aria-current')});Object.keys(SECTION_LABELS).forEach((sectionName)=>el('tab-'+sectionName).classList.toggle('hidden',sectionName!==name));el('section-title').textContent=SECTION_LABELS[name];if(name==='overview'&&state.key&&state.sevenDayStatsError)void loadSevenDayStats().catch(()=>{})}
   function showDashboard(){el('login').classList.add('hidden');el('dashboard').classList.remove('hidden');selectSection('overview')}
   function button(text,handler,className){const item=node('button',text,className);item.type='button';item.addEventListener('click',handler);return item}
@@ -60,7 +139,7 @@
     if(event.shiftKey&&document.activeElement===first){event.preventDefault();last.focus()}
     else if(!event.shiftKey&&document.activeElement===last){event.preventDefault();first.focus()}
   }
-  async function refreshAfterMutation(reference,fallback,message){try{await loadAll();if(message)showStatus(message,'success')}catch(error){showStatus(error.message,'error')}focusTrigger({key:reference&&reference.key,node:reference&&reference.node,fallback})}
+  async function refreshAfterMutation(reference,fallback,message){try{if(!await loadAll())return false;if(message)showStatus(message,'success')}catch(error){if(isIgnoredAsyncError(error))return false;showStatus(error.message,'error')}focusTrigger({key:reference&&reference.key,node:reference&&reference.node,fallback});return true}
   function openUserCreate(trigger){if(resourceDialogEntryBlocked())return;const form=el('user-form');form.reset();form.elements.userId.value='';form.elements.username.disabled=false;el('user-dialog-title').textContent='Create user';el('user-submit').textContent='Create user';setUserPending(false);el('user-token-value').textContent='';el('user-token-result').classList.add('hidden');form.classList.remove('hidden');clearDialogStatus('user-dialog-status');openDialog(el('user-dialog'),triggerReference(trigger,null,el('create-user')),form.elements.username)}
   function openUserEdit(user){if(resourceDialogEntryBlocked())return;const form=el('user-form'),key=`user:${user.id}:edit`;form.reset();form.elements.userId.value=String(user.id);form.elements.username.value=user.username;form.elements.username.disabled=true;form.elements.inputQuota.value=String(user.max_daily_input_tokens);form.elements.outputQuota.value=String(user.max_daily_output_tokens);form.elements.allowedModels.value=(user.allowed_models||[]).join(', ');el('user-dialog-title').textContent='Edit user';el('user-submit').textContent='Save user';setUserPending(false);el('user-token-value').textContent='';el('user-token-result').classList.add('hidden');form.classList.remove('hidden');clearDialogStatus('user-dialog-status');openDialog(el('user-dialog'),triggerReference(actionButtons.get(key),key,el('create-user')),form.elements.inputQuota)}
   function showUserTokenResult(token,title,reference){const form=el('user-form'),dialog=el('user-dialog'),copy=el('user-token-copy');form.classList.add('hidden');el('user-dialog-title').textContent=title;el('user-token-value').textContent=token;el('user-token-result').classList.remove('hidden');setUserPending(false);clearDialogStatus('user-dialog-status');if(dialog.open)copy.focus();else openDialog(dialog,reference,copy)}
@@ -166,7 +245,39 @@
     el('overview-providers-content').replaceChildren(list);
   }
   function statsPath(){const form=new FormData(el('stats-form')),range=String(form.get('range'));const query=new URLSearchParams({range});if(range==='custom'){query.set('start',String(form.get('start')));query.set('end',String(form.get('end')))}return `/admin/stats?${query}`}
-  async function loadAll(){showStatus(T.loading);const[users,models,providers,filters,builtInPii,onboarding,presets]=await Promise.all([api('/admin/users'),api('/admin/models'),api('/admin/providers'),api('/admin/filters'),api('/admin/filters/built-in-pii'),api('/admin/onboarding'),api('/admin/provider-presets')]);state.users=users;state.models=models;state.providers=providers;state.filters=filters;state.builtInPii=builtInPii;state.presets=presets;renderOverviewConfiguration();actionButtons.clear();renderUsers();renderModels();renderProviders();populateFilterModels();renderBuiltInPii();renderFilters();renderOnboarding(onboarding);populateProviders();populatePresets();clearStatus()}
+  async function loadAll(){
+    const request=sessionSnapshot();
+    if(!isCurrentSession(request))return false;
+    showStatus(T.loading);
+    let configuration;
+    try{
+      configuration=await Promise.all([api('/admin/users'),api('/admin/models'),api('/admin/providers'),api('/admin/filters'),api('/admin/filters/built-in-pii'),api('/admin/onboarding'),api('/admin/provider-presets')]);
+    }catch(error){
+      if(isIgnoredAsyncError(error)||!isCurrentSession(request))return false;
+      throw error;
+    }
+    if(!isCurrentSession(request))return false;
+    const[users,models,providers,filters,builtInPii,onboarding,presets]=configuration;
+    state.users=users;
+    state.models=models;
+    state.providers=providers;
+    state.filters=filters;
+    state.builtInPii=builtInPii;
+    state.presets=presets;
+    renderOverviewConfiguration();
+    actionButtons.clear();
+    renderUsers();
+    renderModels();
+    renderProviders();
+    populateFilterModels();
+    renderBuiltInPii();
+    renderFilters();
+    renderOnboarding(onboarding);
+    populateProviders();
+    populatePresets();
+    clearStatus();
+    return true;
+  }
   function loadSevenDayStats(){
     if(state.sevenDayStatsRequest)return state.sevenDayStatsRequest;
     const requestKey=state.key,requestGeneration=state.statisticsGeneration;
@@ -180,7 +291,7 @@
         return stats;
       })
       .catch((error)=>{
-        if(isAuthenticationError(error))throw error;
+        if(isIgnoredAsyncError(error))return null;if(isAuthenticationError(error))throw error;
         if(!state.key||state.key!==requestKey||state.statisticsGeneration!==requestGeneration)return null;
         state.sevenDayStats=null;
         state.sevenDayStatsError=error.message;
@@ -192,17 +303,17 @@
     state.sevenDayStatsRequest=request;
     return request;
   }
-  async function loadInitial(){resetStatisticsState();const[configuration,statistics]=await Promise.allSettled([loadAll(),loadSevenDayStats()]);if(configuration.status==='rejected')throw configuration.reason;if(statistics.status==='rejected'){if(isAuthenticationError(statistics.reason))showStatus(T.authFailed,'error');throw statistics.reason}}
+  async function loadInitial(){resetStatisticsState();const[configuration,statistics]=await Promise.allSettled([loadAll(),loadSevenDayStats()]);if(configuration.status==='rejected'&&!isIgnoredAsyncError(configuration.reason))throw configuration.reason;if(statistics.status==='rejected'&&!isIgnoredAsyncError(statistics.reason))throw statistics.reason;return configuration.status==='fulfilled'&&configuration.value!==false}
   function renderOnboarding(onboarding){const section=el('onboarding');section.classList.toggle('hidden',onboarding.complete);const list=node('ol');onboarding.steps.forEach((step)=>list.append(node('li',`${step.complete?'✓':'○'} ${step.label}`)));const example=node('pre',onboarding.example);el('onboarding-content').replaceChildren(list,example)}
   function renderUsers(){const rows=state.users.map((user)=>{const actions=node('div',undefined,'actions');actions.append(actionButton(`user:${user.id}:edit`,'Edit',()=>openUserEdit(user)));actions.append(actionButton(`user:${user.id}:active`,user.is_active?'Deactivate':'Activate',()=>toggleUser(user),user.is_active?'danger':'secondary'));actions.append(actionButton(`user:${user.id}:rotate`,'Rotate token',()=>rotateToken(user),'secondary'));const access=!user.permissions_valid?'Invalid (access denied)':(user.allowed_models&&user.allowed_models.length?user.allowed_models.join(', '):'All active models');return[user.username,statusBadge(user.is_active),quota(user.max_daily_input_tokens),quota(user.max_daily_output_tokens),access,formatDate(user.created_at),actions]});el('users-content').replaceChildren(table('Users',['Username','Status','Input quota','Output quota','Models','Created','Actions'],rows))}
-  async function toggleUser(user){const key=`user:${user.id}:active`,reference=triggerReference(actionButtons.get(key),key,el('create-user'));if(user.is_active){openConfirmation({trigger:reference,title:'Deactivate user',message:`Deactivate user "${user.username}"?`,submitLabel:'Deactivate user',action:()=>api(`/admin/users/${user.id}`,{method:'DELETE'}),onSuccess:()=>refreshAfterMutation(reference,el('create-user'),T.saved),fallback:el('create-user')});return}try{await api(`/admin/users/${user.id}`,{method:'PUT',body:JSON.stringify({is_active:true})});await refreshAfterMutation(reference,el('create-user'),T.saved)}catch(error){showStatus(error.message,'error')}}
-  function rotateToken(user){const key=`user:${user.id}:rotate`,reference=triggerReference(actionButtons.get(key),key,el('create-user'));openConfirmation({trigger:reference,title:'Rotate user token',message:`Rotate the token for "${user.username}"? The previous token will stop working immediately.`,submitLabel:'Rotate token',action:()=>api(`/admin/users/${user.id}/rotate-token`,{method:'POST'}),onSuccess:async(result)=>{try{await loadAll();showStatus(T.rotated,'success')}catch(error){showStatus(error.message,'error')}showUserTokenResult(result.apiToken,'Token rotated',reference)},fallback:el('create-user')})}
+  async function toggleUser(user){const key=`user:${user.id}:active`,reference=triggerReference(actionButtons.get(key),key,el('create-user'));if(user.is_active){openConfirmation({trigger:reference,title:'Deactivate user',message:`Deactivate user "${user.username}"?`,submitLabel:'Deactivate user',action:()=>api(`/admin/users/${user.id}`,{method:'DELETE'}),onSuccess:()=>refreshAfterMutation(reference,el('create-user'),T.saved),fallback:el('create-user')});return}try{await api(`/admin/users/${user.id}`,{method:'PUT',body:JSON.stringify({is_active:true})});await refreshAfterMutation(reference,el('create-user'),T.saved)}catch(error){if(!isIgnoredAsyncError(error))showStatus(error.message,'error')}}
+  function rotateToken(user){const key=`user:${user.id}:rotate`,reference=triggerReference(actionButtons.get(key),key,el('create-user'));openConfirmation({trigger:reference,title:'Rotate user token',message:`Rotate the token for "${user.username}"? The previous token will stop working immediately.`,submitLabel:'Rotate token',action:()=>api(`/admin/users/${user.id}/rotate-token`,{method:'POST'}),onSuccess:async(result)=>{try{if(!await loadAll())return;showStatus(T.rotated,'success')}catch(error){if(isIgnoredAsyncError(error))return;showStatus(error.message,'error')}showUserTokenResult(result.apiToken,'Token rotated',reference)},fallback:el('create-user')})}
   function renderModels(){const rows=state.models.map((model)=>{const actions=node('div',undefined,'actions');actions.append(actionButton(`model:${model.id}:edit`,'Edit',()=>openModelEdit(model)));actions.append(actionButton(`model:${model.id}:active`,model.is_active?'Deactivate':'Activate',()=>toggleModel(model),model.is_active?'danger':'secondary'));actions.append(actionButton(`model:${model.id}:delete`,'Delete',()=>deleteModel(model),'danger'));return[model.model_name,model.display_name,model.provider_name||'—',number(model.max_tokens),model.context_window===null?T.notConfigured:number(model.context_window),model.input_cost_per_million===null?T.notConfigured:money(model.input_cost_per_million,true),model.output_cost_per_million===null?T.notConfigured:money(model.output_cost_per_million,true),statusBadge(model.is_active),actions]});el('models-content').replaceChildren(table('Models',['Identifier','Name','Provider','Max output','Context','Input / 1M','Output / 1M','Status','Actions'],rows))}
-  async function toggleModel(model){const key=`model:${model.id}:active`,reference=triggerReference(actionButtons.get(key),key,el('create-model'));if(model.is_active){openConfirmation({trigger:reference,title:'Deactivate model',message:`Deactivate model "${model.model_name}"?`,submitLabel:'Deactivate model',action:()=>api(`/admin/models/${model.id}`,{method:'PUT',body:JSON.stringify({is_active:false})}),onSuccess:()=>refreshAfterMutation(reference,el('create-model'),T.saved),fallback:el('create-model')});return}try{await api(`/admin/models/${model.id}`,{method:'PUT',body:JSON.stringify({is_active:true})});await refreshAfterMutation(reference,el('create-model'),T.saved)}catch(error){showStatus(error.message,'error')}}
+  async function toggleModel(model){const key=`model:${model.id}:active`,reference=triggerReference(actionButtons.get(key),key,el('create-model'));if(model.is_active){openConfirmation({trigger:reference,title:'Deactivate model',message:`Deactivate model "${model.model_name}"?`,submitLabel:'Deactivate model',action:()=>api(`/admin/models/${model.id}`,{method:'PUT',body:JSON.stringify({is_active:false})}),onSuccess:()=>refreshAfterMutation(reference,el('create-model'),T.saved),fallback:el('create-model')});return}try{await api(`/admin/models/${model.id}`,{method:'PUT',body:JSON.stringify({is_active:true})});await refreshAfterMutation(reference,el('create-model'),T.saved)}catch(error){if(!isIgnoredAsyncError(error))showStatus(error.message,'error')}}
   function deleteModel(model){const key=`model:${model.id}:delete`,reference=triggerReference(actionButtons.get(key),key,el('create-model'));openConfirmation({trigger:reference,title:'Delete model',message:`Delete model "${model.model_name}" permanently?`,submitLabel:'Delete model',action:()=>api(`/admin/models/${model.id}`,{method:'DELETE'}),onSuccess:()=>refreshAfterMutation(null,el('create-model'),T.saved),fallback:el('create-model')})}
   function renderProviders(){const rows=state.providers.map((provider)=>{const actions=node('div',undefined,'actions');actions.append(actionButton(`provider:${provider.id}:edit`,'Edit',()=>openProviderEdit(provider)));actions.append(actionButton(`provider:${provider.id}:test`,'Test',async()=>{const result=await api(`/admin/providers/${provider.id}/test`,{method:'POST'});showStatus(result.message||result.error||result.status,result.status==='healthy'?'success':'error');await loadAll()}));actions.append(actionButton(`provider:${provider.id}:discover`,'Discover models',()=>discoverModels(provider),'secondary'));actions.append(actionButton(`provider:${provider.id}:active`,provider.is_active?'Deactivate':'Activate',()=>toggleProvider(provider),provider.is_active?'danger':'secondary'));actions.append(actionButton(`provider:${provider.id}:delete`,'Delete',()=>deleteProvider(provider),'danger'));const health=provider.last_health_check?`${provider.health_status} · ${number(provider.last_health_latency_ms)} ms · ${formatDate(provider.last_health_check)}`:provider.health_status;return[provider.provider_name,provider.display_name,provider.base_url,provider.auth_type,provider.hasApiKey?'Configured':'None',health,statusBadge(provider.is_active),actions]});el('providers-content').replaceChildren(table('Providers',['Identifier','Name','URL','Auth','Credential','Last health check','Status','Actions'],rows))}
   async function discoverModels(provider){if(resourceDialogEntryBlocked())return;const key=`provider:${provider.id}:discover`,request={key};pendingDiscoveryRequest=request;try{const models=await api(`/admin/providers/${provider.id}/discover-models`);if(pendingDiscoveryRequest!==request)return;pendingDiscoveryRequest=null;if(!models.length){showStatus('No unregistered models were found.','success');return}if(!openModelCreate(actionButtons.get(key),key))return;const names=models.map((model)=>model.model_name);discovery={providerId:provider.id,names:new Set(names)};const form=el('model-form');form.elements.providerId.value=String(provider.id);form.elements.providerId.disabled=true;form.elements.modelName.value=names[0];form.elements.displayName.value=names[0];el('model-discovery-list').replaceChildren(...names.map((name)=>node('li',name)));el('model-discovery').classList.remove('hidden')}catch(error){if(pendingDiscoveryRequest!==request)return;pendingDiscoveryRequest=null;showStatus(error.message,'error')}}
-  async function toggleProvider(provider){const key=`provider:${provider.id}:active`,reference=triggerReference(actionButtons.get(key),key,el('create-provider'));if(provider.is_active){openConfirmation({trigger:reference,title:'Deactivate provider',message:`Deactivate provider "${provider.provider_name}"?`,submitLabel:'Deactivate provider',action:()=>api(`/admin/providers/${provider.id}`,{method:'PUT',body:JSON.stringify({is_active:false})}),onSuccess:()=>refreshAfterMutation(reference,el('create-provider'),T.saved),fallback:el('create-provider')});return}try{await api(`/admin/providers/${provider.id}`,{method:'PUT',body:JSON.stringify({is_active:true})});await refreshAfterMutation(reference,el('create-provider'),T.saved)}catch(error){showStatus(error.message,'error')}}
+  async function toggleProvider(provider){const key=`provider:${provider.id}:active`,reference=triggerReference(actionButtons.get(key),key,el('create-provider'));if(provider.is_active){openConfirmation({trigger:reference,title:'Deactivate provider',message:`Deactivate provider "${provider.provider_name}"?`,submitLabel:'Deactivate provider',action:()=>api(`/admin/providers/${provider.id}`,{method:'PUT',body:JSON.stringify({is_active:false})}),onSuccess:()=>refreshAfterMutation(reference,el('create-provider'),T.saved),fallback:el('create-provider')});return}try{await api(`/admin/providers/${provider.id}`,{method:'PUT',body:JSON.stringify({is_active:true})});await refreshAfterMutation(reference,el('create-provider'),T.saved)}catch(error){if(!isIgnoredAsyncError(error))showStatus(error.message,'error')}}
   function deleteProvider(provider){const key=`provider:${provider.id}:delete`,reference=triggerReference(actionButtons.get(key),key,el('create-provider'));openConfirmation({trigger:reference,title:'Delete provider',message:`Delete provider "${provider.provider_name}" permanently?`,submitLabel:'Delete provider',action:()=>api(`/admin/providers/${provider.id}`,{method:'DELETE'}),onSuccess:()=>refreshAfterMutation(null,el('create-provider'),T.saved),fallback:el('create-provider')})}
   function filterScope(filter){if(filter.is_global)return 'Global';if(!filter.model_ids.length)return 'No models';return filter.model_ids.map((modelId)=>{const model=state.models.find((item)=>item.id===modelId);return model?model.model_name:String(modelId)}).join(', ')}
   function renderFilters(){const rows=state.filters.map((filter)=>{const actions=node('div',undefined,'actions');actions.append(button('Edit',()=>editFilter(filter)));actions.append(button('Delete',()=>deleteFilter(filter),'danger'));return[filter.name,number(filter.patterns.length),filter.input_action||'None',filter.output_action||'None',filterScope(filter),statusBadge(filter.is_active,filterStatus(filter)),formatDate(filter.updated_at),actions]});el('filters-content').replaceChildren(table('Filters',['Name','Patterns','Input','Output','Scope','Status','Updated','Actions'],rows))}
@@ -252,21 +363,21 @@
   el('model-dialog').addEventListener('close',()=>handleDialogClose('model-dialog-status',()=>{resetModelDiscovery();el('model-advanced').open=false;if(!pendingModelOperation)setModelPending(false)}));
   el('provider-dialog').addEventListener('close',()=>handleDialogClose('provider-dialog-status',()=>{const form=el('provider-form');form.elements.storedKey.value='';form.elements.storedKey.disabled=false;form.elements.removeStoredKey.checked=false;form.elements.removeStoredKey.disabled=false;if(!pendingProviderOperation)setProviderPending(false)}));
   el('confirm-dialog').addEventListener('close',()=>handleDialogClose('confirm-dialog-status',()=>{if(!pendingConfirmationOperation){pendingConfirmation=null;setConfirmationPending(false)}}));
-  el('login-form').addEventListener('submit',async(event)=>{event.preventDefault();state.key=el('admin-key').value;el('admin-key').value='';try{await api('/admin/users');showDashboard();showStatus(T.signedIn,'success');await loadInitial()}catch(error){if(state.key)showStatus(error.message,'error')}});
-  el('sign-out').addEventListener('click',()=>{state.key='';showLogin();showStatus(T.signedOut,'success')});
-  el('user-token-copy').addEventListener('click',async()=>{try{await navigator.clipboard.writeText(el('user-token-value').textContent);showDialogStatus('user-dialog-status','Token copied.','success')}catch(error){showDialogStatus('user-dialog-status',error.message)}});
+  el('login-form').addEventListener('submit',async(event)=>{event.preventDefault();const key=el('admin-key').value;el('admin-key').value='';beginSession(key);const session=sessionSnapshot();try{await api('/admin/users');showDashboard();showStatus(T.signedIn,'success');await loadInitial()}catch(error){if(!isIgnoredAsyncError(error)&&isCurrentSession(session))showStatus(error.message,'error')}});
+  el('sign-out').addEventListener('click',()=>endSession(T.signedOut,'success'));
+  el('user-token-copy').addEventListener('click',async()=>{const session=sessionSnapshot();try{await navigator.clipboard.writeText(el('user-token-value').textContent);if(isCurrentSession(session))showDialogStatus('user-dialog-status','Token copied.','success')}catch(error){if(isCurrentSession(session))showDialogStatus('user-dialog-status',error.message)}});
   el('confirm-form').addEventListener('submit',async(event)=>{event.preventDefault();const submit=el('confirm-submit');if(submit.disabled||pendingConfirmationOperation||!pendingConfirmation)return;const confirmation=pendingConfirmation,operation={confirmation};pendingConfirmationOperation=operation;setConfirmationPending(true);try{const result=await confirmation.action();if(pendingConfirmationOperation!==operation)return;closeDialog(el('confirm-dialog'),false);await confirmation.onSuccess(result);if(pendingConfirmationOperation!==operation)return;pendingConfirmationOperation=null;pendingConfirmation=null;setConfirmationPending(false)}catch(error){if(pendingConfirmationOperation!==operation)return;pendingConfirmationOperation=null;showDialogStatus('confirm-dialog-status',error.message);setConfirmationPending(false)}});
-  el('user-form').addEventListener('submit',async(event)=>{event.preventDefault();const formElement=event.currentTarget,submit=el('user-submit');if(submit.disabled||pendingUserOperation)return;const operation={};pendingUserOperation=operation;setUserPending(true);const form=new FormData(formElement),userId=String(formElement.elements.userId.value),body={max_daily_input_tokens:Number(form.get('inputQuota')),max_daily_output_tokens:Number(form.get('outputQuota')),allowed_models:String(form.get('allowedModels')).split(',').map((value)=>value.trim()).filter(Boolean)},reference=userId?triggerReference(null,`user:${userId}:edit`,el('create-user')):activeDialogTrigger;if(!userId)body.username=form.get('username');try{const result=await api(userId?`/admin/users/${userId}`:'/admin/users',{method:userId?'PUT':'POST',body:JSON.stringify(body)});if(pendingUserOperation!==operation)return;if(userId){closeDialog(el('user-dialog'),false);await refreshAfterMutation(reference,el('create-user'),T.saved);if(pendingUserOperation!==operation)return;pendingUserOperation=null;setUserPending(false);return}pendingUserOperation=null;showUserTokenResult(result.apiToken,'User created',reference);try{await loadAll();showStatus(T.created,'success')}catch(error){showStatus(error.message,'error')}}catch(error){if(pendingUserOperation!==operation)return;pendingUserOperation=null;showDialogStatus('user-dialog-status',error.message);setUserPending(false)}});
+  el('user-form').addEventListener('submit',async(event)=>{event.preventDefault();const formElement=event.currentTarget,submit=el('user-submit');if(submit.disabled||pendingUserOperation)return;const operation={};pendingUserOperation=operation;setUserPending(true);const form=new FormData(formElement),userId=String(formElement.elements.userId.value),body={max_daily_input_tokens:Number(form.get('inputQuota')),max_daily_output_tokens:Number(form.get('outputQuota')),allowed_models:String(form.get('allowedModels')).split(',').map((value)=>value.trim()).filter(Boolean)},reference=userId?triggerReference(null,`user:${userId}:edit`,el('create-user')):activeDialogTrigger;if(!userId)body.username=form.get('username');try{const result=await api(userId?`/admin/users/${userId}`:'/admin/users',{method:userId?'PUT':'POST',body:JSON.stringify(body)});if(pendingUserOperation!==operation)return;if(userId){closeDialog(el('user-dialog'),false);await refreshAfterMutation(reference,el('create-user'),T.saved);if(pendingUserOperation!==operation)return;pendingUserOperation=null;setUserPending(false);return}pendingUserOperation=null;showUserTokenResult(result.apiToken,'User created',reference);try{if(!await loadAll())return;showStatus(T.created,'success')}catch(error){if(!isIgnoredAsyncError(error))showStatus(error.message,'error')}}catch(error){if(pendingUserOperation!==operation)return;pendingUserOperation=null;showDialogStatus('user-dialog-status',error.message);setUserPending(false)}});
   el('model-form').addEventListener('submit',async(event)=>{event.preventDefault();const formElement=event.currentTarget,submit=el('model-submit');if(submit.disabled||pendingModelOperation||!el('model-dialog').open)return;const form=new FormData(formElement),body=modelPayload(form),modelId=String(formElement.elements.modelId.value),reference=modelId?triggerReference(null,`model:${modelId}:edit`,el('create-model')):activeDialogTrigger;if(discovery&&!discovery.names.has(body.model_name)){showDialogStatus('model-dialog-status','Choose a discovered identifier from the list.');return}const operation={};pendingModelOperation=operation;setModelPending(true);try{await api(modelId?`/admin/models/${modelId}`:'/admin/models',{method:modelId?'PUT':'POST',body:JSON.stringify(body)});if(pendingModelOperation!==operation)return;closeDialog(el('model-dialog'),false);await refreshAfterMutation(reference,el('create-model'),modelId?T.saved:T.created);if(pendingModelOperation!==operation)return;pendingModelOperation=null;setModelPending(false)}catch(error){if(pendingModelOperation!==operation)return;pendingModelOperation=null;showDialogStatus('model-dialog-status',error.message);setModelPending(false)}});
   el('provider-form').addEventListener('submit',async(event)=>{event.preventDefault();const formElement=event.currentTarget,submit=el('provider-submit');if(submit.disabled||pendingProviderOperation||!el('provider-dialog').open)return;const form=new FormData(formElement),providerId=String(formElement.elements.providerId.value),body=providerPayload(form,Boolean(providerId)),reference=providerId?triggerReference(null,`provider:${providerId}:edit`,el('create-provider')):activeDialogTrigger,operation={};pendingProviderOperation=operation;setProviderPending(true);try{await api(providerId?`/admin/providers/${providerId}`:'/admin/providers',{method:providerId?'PUT':'POST',body:JSON.stringify(body)});if(pendingProviderOperation!==operation)return;closeDialog(el('provider-dialog'),false);await refreshAfterMutation(reference,el('create-provider'),providerId?T.saved:T.created);if(pendingProviderOperation!==operation)return;pendingProviderOperation=null;setProviderPending(false)}catch(error){if(pendingProviderOperation!==operation)return;pendingProviderOperation=null;showDialogStatus('provider-dialog-status',error.message);setProviderPending(false)}});
   el('provider-form').elements.preset.addEventListener('change',(event)=>{const preset=state.presets.find((item)=>item.id===event.target.value);if(!preset)return;const form=el('provider-form');form.elements.providerName.value=preset.id;form.elements.displayName.value=preset.name;form.elements.baseUrl.value=preset.base_url});
   el('provider-form').elements.removeStoredKey.addEventListener('change',(event)=>{const secret=el('provider-form').elements.storedKey;if(event.target.checked){secret.value='';secret.disabled=true}else secret.disabled=false});
   el('provider-form').elements.storedKey.addEventListener('input',()=>{const form=el('provider-form');if(form.elements.storedKey.value)form.elements.removeStoredKey.checked=false});
-  el('filter-form').addEventListener('submit',async(event)=>{event.preventDefault();const form=new FormData(event.currentTarget),filterId=String(form.get('filterId'));try{await api(filterId?`/admin/filters/${filterId}`:'/admin/filters',{method:filterId?'PUT':'POST',body:JSON.stringify(filterPayload(form))});resetFilterForm();showStatus(filterId?T.saved:T.created,'success');await loadAll()}catch(error){showStatus(error.message,'error')}});
-  el('built-in-pii-form').addEventListener('submit',async(event)=>{event.preventDefault();const form=event.currentTarget,isActive=form.elements.isActive.checked;try{await api('/admin/filters/built-in-pii',{method:'PUT',body:JSON.stringify({is_active:isActive})});await loadAll();showStatus(T.saved,'success')}catch(error){showStatus(error.message,'error')}});
+  el('filter-form').addEventListener('submit',async(event)=>{event.preventDefault();const form=new FormData(event.currentTarget),filterId=String(form.get('filterId'));try{await api(filterId?`/admin/filters/${filterId}`:'/admin/filters',{method:filterId?'PUT':'POST',body:JSON.stringify(filterPayload(form))});resetFilterForm();if(!await loadAll())return;showStatus(filterId?T.saved:T.created,'success')}catch(error){if(!isIgnoredAsyncError(error))showStatus(error.message,'error')}});
+  el('built-in-pii-form').addEventListener('submit',async(event)=>{event.preventDefault();const form=event.currentTarget,isActive=form.elements.isActive.checked;try{await api('/admin/filters/built-in-pii',{method:'PUT',body:JSON.stringify({is_active:isActive})});if(!await loadAll())return;showStatus(T.saved,'success')}catch(error){if(!isIgnoredAsyncError(error))showStatus(error.message,'error')}});
 
   el('filter-cancel').addEventListener('click',()=>resetFilterForm(true));
   el('filter-form').elements.isGlobal.addEventListener('change',syncFilterModelScope);
-  el('stats-form').addEventListener('submit',async(event)=>{event.preventDefault();state.usageHasAppliedRange=true;const requestKey=state.key,requestGeneration=state.statisticsGeneration;try{const stats=await api(statsPath());if(!state.key||state.key!==requestKey||state.statisticsGeneration!==requestGeneration)return;state.usageStats=stats;renderUsageStats(stats)}catch(error){if(!isAuthenticationError(error)&&state.key&&state.key===requestKey&&state.statisticsGeneration===requestGeneration)renderUsageStatsError(error.message)}});
-  window.addEventListener('unhandledrejection',(event)=>showStatus(event.reason&&event.reason.message?event.reason.message:T.requestFailed,'error'));
-  showLogin();
+  el('stats-form').addEventListener('submit',async(event)=>{event.preventDefault();state.usageHasAppliedRange=true;const requestKey=state.key,requestGeneration=state.statisticsGeneration;try{const stats=await api(statsPath());if(!state.key||state.key!==requestKey||state.statisticsGeneration!==requestGeneration)return;state.usageStats=stats;renderUsageStats(stats)}catch(error){if(!isIgnoredAsyncError(error)&&!isAuthenticationError(error)&&state.key&&state.key===requestKey&&state.statisticsGeneration===requestGeneration)renderUsageStatsError(error.message)}});
+  window.addEventListener('unhandledrejection',(event)=>{if(isIgnoredAsyncError(event.reason)){event.preventDefault();return}showStatus(event.reason&&event.reason.message?event.reason.message:T.requestFailed,'error')});
+  resetSessionState();showLogin();
