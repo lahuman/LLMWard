@@ -70,6 +70,10 @@ class FakeNode extends EventTarget {
     this.attributes.set(name, String(value));
   }
 
+
+  removeAttribute(name) {
+    this.attributes.delete(name);
+  }
   getAttribute(name) {
     return this.attributes.get(name) ?? null;
   }
@@ -171,7 +175,13 @@ function deferred() {
   return { promise, resolve };
 }
 
-function createDashboardHarness({ storedKey = '', fetchOverride, confirmResult = false, clipboardWrite } = {}) {
+function createDashboardHarness({
+  loginKey = '',
+  initialSessionValues = [],
+  fetchOverride,
+  confirmResult = false,
+  clipboardWrite,
+} = {}) {
   const elements = new Map();
   const register = (id, item = new FakeNode()) => {
     elements.set(id, item);
@@ -221,10 +231,12 @@ function createDashboardHarness({ storedKey = '', fetchOverride, confirmResult =
   const filterForm = new FakeForm();
   filterForm.elements.modelIds = Object.assign(new FakeNode(), { multiple: true });
   filterForm.elements.isGlobal = new FakeNode();
-  const statsForm = new FakeForm({ range: '24h', start: '', end: '' });
+  const statsForm = new FakeForm({ range: '7d', start: '', end: '' });
   const requests = [];
   const clipboardWrites = [];
-  const sessionValues = new Map(storedKey ? [['llmGatewayAdminKey', storedKey]] : []);
+  const sessionValues = new Map(initialSessionValues);
+  const storageCalls = [];
+  let bootstrapLoginPending = Boolean(loginKey);
   let confirmCount = 0;
   let promptCount = 0;
   const builtInPiiForm = new FakeForm();
@@ -297,6 +309,10 @@ function createDashboardHarness({ storedKey = '', fetchOverride, confirmResult =
     document,
     navigator: { clipboard: { writeText: clipboardWrite || (async (value) => clipboardWrites.push(value)) } },
     fetch: async (route, options = {}) => {
+      if (bootstrapLoginPending && route === '/admin/users' && !options.method) {
+        bootstrapLoginPending = false;
+        return response([]);
+      }
       requests.push({ route, options });
       const overridden = fetchOverride && fetchOverride(route, options);
       if (overridden !== undefined) return overridden;
@@ -311,13 +327,22 @@ function createDashboardHarness({ storedKey = '', fetchOverride, confirmResult =
       if (route === '/admin/filters') return response([]);
       if (route === '/admin/onboarding') return response({ complete: true, steps: [], example: '' });
       if (route === '/admin/provider-presets') return response([]);
-      if (route.startsWith('/admin/stats?')) return response({ summary: {}, period: {}, by_user: [], by_model: [], by_provider: [], recent_requests: [] });
+      if (route.startsWith('/admin/stats?')) return response(dashboardStats());
       throw new Error(`Unexpected route: ${route}`);
     },
     sessionStorage: {
-      getItem: (key) => sessionValues.get(key) || null,
-      setItem: (key, value) => sessionValues.set(key, String(value)),
-      removeItem: (key) => sessionValues.delete(key),
+      getItem(key) {
+        storageCalls.push({ method: 'getItem', key });
+        return sessionValues.get(key) || null;
+      },
+      setItem(key, value) {
+        storageCalls.push({ method: 'setItem', key });
+        sessionValues.set(key, String(value));
+      },
+      removeItem(key) {
+        storageCalls.push({ method: 'removeItem', key });
+        sessionValues.delete(key);
+      },
     },
     window: new FakeNode(),
   };
@@ -325,9 +350,16 @@ function createDashboardHarness({ storedKey = '', fetchOverride, confirmResult =
   context.window.confirm = () => { confirmCount += 1; return confirmResult; };
   context.window.addEventListener = () => {};
   vm.runInNewContext(fs.readFileSync(path.join(__dirname, '..', 'public', 'admin-dashboard.js'), 'utf8'), context);
+  if (loginKey) {
+    document.getElementById('admin-key').value = loginKey;
+    loginForm.dispatchEvent(new Event('submit', { cancelable: true }));
+  }
   return {
     adminKey: document.getElementById('admin-key'),
     loginForm,
+    login: document.getElementById('login'),
+    dashboard: document.getElementById('dashboard'),
+    signOut: document.getElementById('sign-out'),
     userForm,
     modelForm,
     providerForm,
@@ -371,6 +403,7 @@ function createDashboardHarness({ storedKey = '', fetchOverride, confirmResult =
     confirmMessage: document.getElementById('confirm-message'),
     confirmDialogStatus: document.getElementById('confirm-dialog-status'),
     clipboardWrites,
+    storageCalls,
     sessionValues,
     get confirmCount() { return confirmCount; },
     get promptCount() { return promptCount; },
@@ -436,6 +469,38 @@ function dashboardProvider(overrides = {}) {
     last_health_check: null,
     is_active: true,
     ...overrides,
+  };
+}
+
+function dashboardStats(overrides = {}) {
+  const summary = {
+    total_requests: 0,
+    successful_requests: 0,
+    failed_requests: 0,
+    error_rate: 0,
+    total_input: 0,
+    total_output: 0,
+    total_tokens: 0,
+    average_response_time_ms: 0,
+    p95_response_time_ms: 0,
+    estimated_cost_usd: 0,
+    cost_configured: false,
+    ...(overrides.summary || {}),
+  };
+  const period = {
+    start: '2026-08-08T00:00:00.000Z',
+    end: '2026-08-15T00:00:00.000Z',
+    ...(overrides.period || {}),
+  };
+  return {
+    generated_at: '2026-08-15T01:00:00.000Z',
+    by_user: [],
+    by_model: [],
+    by_provider: [],
+    recent_requests: [],
+    ...overrides,
+    summary,
+    period,
   };
 }
 test('filters tab keeps the built-in PII filter before its sibling usage guide', () => {
@@ -546,7 +611,7 @@ test('provider create presets populate the modal and successful submit reloads c
   const mutation = deferred();
   const preset = { id: 'openai-compatible', name: 'OpenAI compatible', base_url: 'https://api.example/v1' };
   const harness = createDashboardHarness({
-    storedKey: 'stored-admin-key',
+    loginKey: 'stored-admin-key',
     fetchOverride(route, options) {
       if (route === '/admin/provider-presets') return response([preset]);
       if (route === '/admin/providers' && options.method === 'POST') return mutation.promise;
@@ -610,7 +675,7 @@ test('provider create presets populate the modal and successful submit reloads c
 
 test('provider edit never prefills or exposes credentials', async () => {
   const provider = dashboardProvider({ hasApiKey: true, stored_api_key: 'must-not-be-visible', api_key_env_name: 'SECRET_ENV_NAME' });
-  const harness = createDashboardHarness({ storedKey: 'stored-admin-key', fetchOverride(route) {
+  const harness = createDashboardHarness({ loginKey: 'stored-admin-key', fetchOverride(route) {
     if (route === '/admin/providers') return response([provider]);
     return undefined;
   }});
@@ -639,7 +704,7 @@ test('provider edit never prefills or exposes credentials', async () => {
 test('provider edit distinguishes unchanged replacement and explicit credential removal', async () => {
   async function submitCredential(configure) {
     const provider = dashboardProvider({ hasApiKey: true });
-    const harness = createDashboardHarness({ storedKey: 'stored-admin-key', fetchOverride(route, options) {
+    const harness = createDashboardHarness({ loginKey: 'stored-admin-key', fetchOverride(route, options) {
       if (route === '/admin/providers') return response([provider]);
       if (route === '/admin/providers/7' && options.method === 'PUT') return response(provider);
       return undefined;
@@ -674,7 +739,7 @@ test('provider edit distinguishes unchanged replacement and explicit credential 
 });
 
 test('provider credential controls are mutually exclusive and clear on close', async () => {
-  const harness = createDashboardHarness({ storedKey: 'stored-admin-key', fetchOverride(route) {
+  const harness = createDashboardHarness({ loginKey: 'stored-admin-key', fetchOverride(route) {
     if (route === '/admin/providers') return response([dashboardProvider({ hasApiKey: true })]);
     return undefined;
   }});
@@ -708,7 +773,7 @@ test('provider credential controls are mutually exclusive and clear on close', a
 test('provider mutation errors stay local and preserve the replacement credential', async () => {
   const mutation = deferred();
   const error = '<script>Provider validation failed</script>';
-  const harness = createDashboardHarness({ storedKey: 'stored-admin-key', fetchOverride(route, options) {
+  const harness = createDashboardHarness({ loginKey: 'stored-admin-key', fetchOverride(route, options) {
     if (route === '/admin/providers') return response([dashboardProvider({ hasApiKey: true })]);
     if (route === '/admin/providers/7' && options.method === 'PUT') return mutation.promise;
     return undefined;
@@ -746,7 +811,7 @@ test('provider deactivation and hard deletion use named confirmation', async () 
   const active = dashboardProvider({ id: 61, provider_name: 'active-provider' });
   const inactive = dashboardProvider({ id: 62, provider_name: 'inactive-provider', is_active: false });
   let deleted = false;
-  const harness = createDashboardHarness({ storedKey: 'stored-admin-key', fetchOverride(route, options) {
+  const harness = createDashboardHarness({ loginKey: 'stored-admin-key', fetchOverride(route, options) {
     if (route === '/admin/providers' && !options.method) return response(deleted ? [inactive] : [active, inactive]);
     if (route === '/admin/providers/61' && options.method === 'PUT') return response({ ...active, is_active: false });
     if (route === '/admin/providers/62' && options.method === 'PUT') return response({ ...inactive, is_active: true });
@@ -786,7 +851,7 @@ test('provider deactivation and hard deletion use named confirmation', async () 
 test('provider delete guards keep the confirmation open with the server error', async () => {
   const provider = dashboardProvider({ id: 71, provider_name: 'attached-<provider>' });
   const error = '<script>Cannot delete a provider with attached models</script>';
-  const harness = createDashboardHarness({ storedKey: 'stored-admin-key', fetchOverride(route, options) {
+  const harness = createDashboardHarness({ loginKey: 'stored-admin-key', fetchOverride(route, options) {
     if (route === '/admin/providers') return response([provider]);
     if (route === '/admin/providers/71' && options.method === 'DELETE') {
       return { ok: false, status: 400, json: async () => ({ error }) };
@@ -839,29 +904,36 @@ test('explicit login starts configuration and statistics together', async () => 
   assert.equal(statisticsStarted, true);
 });
 
-test('stored-key initial loading preserves a statistics error after delayed configuration succeeds', async () => {
-  const delayedUsers = deferred();
-  const { requests, status } = createDashboardHarness({
-    storedKey: 'stored-admin-key',
-    fetchOverride(route) {
-      if (route === '/admin/users') return delayedUsers.promise;
-      if (route.startsWith('/admin/stats?')) {
-        return { ok: false, status: 500, json: async () => ({ error: 'Statistics failed.' }) };
-      }
-      return undefined;
-    },
+test('administrator key stays memory-only and reload starts signed out', async () => {
+  const first = createDashboardHarness();
+  first.adminKey.value = 'memory-only-admin-key';
+  first.loginForm.dispatchEvent(new Event('submit', { cancelable: true }));
+  await settle();
+
+  assert.equal(first.adminKey.value, '');
+  assert.equal(first.login.classList.contains('hidden'), true);
+  assert.equal(first.dashboard.classList.contains('hidden'), false);
+  assert.deepEqual(first.storageCalls, []);
+  assert.equal(first.sessionValues.has('llmGatewayAdminKey'), false);
+
+  const reloaded = createDashboardHarness({
+    initialSessionValues: [['llmGatewayAdminKey', 'legacy-stored-key']],
   });
   await settle();
+  assert.equal(reloaded.requests.length, 0);
+  assert.equal(reloaded.login.classList.contains('hidden'), false);
+  assert.equal(reloaded.dashboard.classList.contains('hidden'), true);
+  assert.deepEqual(reloaded.storageCalls, []);
+});
 
-  const configurationStarted = requests.some(({ route }) => route === '/admin/providers');
-  const statisticsStarted = requests.some(({ route }) => route.startsWith('/admin/stats?'));
-  delayedUsers.resolve(response([]));
+test('sign out clears the in-memory session and returns to login', async () => {
+  const harness = createDashboardHarness({ loginKey: 'memory-only-admin-key' });
   await settle();
-
-  assert.equal(configurationStarted, true);
-  assert.equal(statisticsStarted, true);
-  assert.equal(status.textContent, 'Statistics failed.');
-  assert.equal(status.className, 'status error');
+  harness.signOut.dispatchEvent(new Event('click'));
+  assert.equal(harness.login.classList.contains('hidden'), false);
+  assert.equal(harness.dashboard.classList.contains('hidden'), true);
+  assert.equal(harness.adminKey.value, '');
+  assert.deepEqual(harness.storageCalls, []);
 });
 
 
@@ -870,7 +942,7 @@ test('user create submits once and shows a one-time token until explicitly close
   const token = 'created-<token>';
   let userLoads = 0;
   const harness = createDashboardHarness({
-    storedKey: 'stored-admin-key',
+    loginKey: 'stored-admin-key',
     fetchOverride(route, options) {
       if (route === '/admin/users' && options.method === 'POST') return mutation.promise;
       if (route === '/admin/users' && !options.method) {
@@ -938,7 +1010,7 @@ test('user edit populates supported fields without enabling username rename', as
   };
   const mutation = deferred();
   const harness = createDashboardHarness({
-    storedKey: 'stored-admin-key',
+    loginKey: 'stored-admin-key',
     fetchOverride(route, options) {
       if (route === '/admin/users') return response([user]);
       if (route === '/admin/users/7' && options.method === 'PUT') return mutation.promise;
@@ -988,7 +1060,7 @@ test('user mutation errors stay local and preserve input', async () => {
   const mutation = deferred();
   const hostileError = '<script>invalid</script>';
   const harness = createDashboardHarness({
-    storedKey: 'stored-admin-key',
+    loginKey: 'stored-admin-key',
     fetchOverride(route, options) {
       if (route === '/admin/users' && options.method === 'POST') return mutation.promise;
       return undefined;
@@ -1030,7 +1102,7 @@ test('user deactivation is confirmed by name and uses DELETE while activation is
   const deactivation = deferred();
   let userLoads = 0;
   const harness = createDashboardHarness({
-    storedKey: 'stored-admin-key',
+    loginKey: 'stored-admin-key',
     fetchOverride(route, options) {
       if (route === '/admin/users' && !options.method) {
         userLoads += 1;
@@ -1074,7 +1146,7 @@ test('failed deactivation keeps confirmation open with its server error', async 
   const mutation = deferred();
   const error = '<script>cannot deactivate</script>';
   const harness = createDashboardHarness({
-    storedKey: 'stored-admin-key',
+    loginKey: 'stored-admin-key',
     fetchOverride(route, options) {
       if (route === '/admin/users') return response([user]);
       if (route === '/admin/users/9' && options.method === 'DELETE') return mutation.promise;
@@ -1108,7 +1180,7 @@ test('token rotation requires confirmation and reuses the one-time token result'
   const mutation = deferred();
   const token = 'rotated-<token>';
   const harness = createDashboardHarness({
-    storedKey: 'stored-admin-key',
+    loginKey: 'stored-admin-key',
     fetchOverride(route, options) {
       if (route === '/admin/users') return response([user]);
       if (route === '/admin/users/11/rotate-token' && options.method === 'POST') return mutation.promise;
@@ -1161,7 +1233,7 @@ test('pending token rotation refresh isolates every resource dialog entry point'
   let userLoads = 0;
   let discoveryRequests = 0;
   const harness = createDashboardHarness({
-    storedKey: 'stored-admin-key',
+    loginKey: 'stored-admin-key',
     fetchOverride(route, options) {
       if (route === '/admin/users' && !options.method) {
         userLoads += 1;
@@ -1256,7 +1328,7 @@ test('pending user creation cannot be canceled reopened or submitted twice', asy
   const mutation = deferred();
   const token = 'only-valid-created-token';
   const harness = createDashboardHarness({
-    storedKey: 'stored-admin-key',
+    loginKey: 'stored-admin-key',
     fetchOverride(route, options) {
       if (route === '/admin/users' && options.method === 'POST') return mutation.promise;
       return undefined;
@@ -1298,7 +1370,7 @@ test('pending token rotation cannot be canceled reopened or submitted twice', as
   const mutation = deferred();
   const token = 'only-valid-rotated-token';
   const harness = createDashboardHarness({
-    storedKey: 'stored-admin-key',
+    loginKey: 'stored-admin-key',
     fetchOverride(route, options) {
       if (route === '/admin/users') return response([user]);
       if (route === '/admin/users/27/rotate-token' && options.method === 'POST') return mutation.promise;
@@ -1344,7 +1416,7 @@ test('token copy success feedback stays visible and announceable in result mode'
 
   const token = 'copy-success-token';
   const harness = createDashboardHarness({
-    storedKey: 'stored-admin-key',
+    loginKey: 'stored-admin-key',
     fetchOverride(route, options) {
       if (route === '/admin/users' && options.method === 'POST') return response({ apiToken: token });
       return undefined;
@@ -1377,7 +1449,7 @@ test('token copy rejection feedback stays visible and announceable in result mod
   const token = 'copy-failure-token';
   const clipboardError = '<script>Clipboard denied</script>';
   const harness = createDashboardHarness({
-    storedKey: 'stored-admin-key',
+    loginKey: 'stored-admin-key',
     clipboardWrite: async () => { throw new Error(clipboardError); },
     fetchOverride(route, options) {
       if (route === '/admin/users' && options.method === 'POST') return response({ apiToken: token });
@@ -1418,7 +1490,7 @@ test('model table distinguishes Max output and Context', async () => {
   const configured = dashboardModel({ context_window: 8192 });
   const unknown = dashboardModel({ id: 32, model_name: 'model-b', display_name: 'Model B' });
   const harness = createDashboardHarness({
-    storedKey: 'stored-admin-key',
+    loginKey: 'stored-admin-key',
     fetchOverride(route) {
       if (route === '/admin/models') return response([configured, unknown]);
       if (route === '/admin/providers') return response([dashboardProvider()]);
@@ -1494,7 +1566,7 @@ test('model edit populates all fields and explicit blanks clear defaults', async
     default_seed: 0,
   });
   const harness = createDashboardHarness({
-    storedKey: 'stored-admin-key',
+    loginKey: 'stored-admin-key',
     fetchOverride(route, options) {
       if (route === '/admin/models') return response([model]);
       if (route === '/admin/providers') return response([dashboardProvider()]);
@@ -1545,7 +1617,7 @@ test('model validation errors stay local and a refresh failure cannot repeat a s
   let modelLoads = 0;
   let puts = 0;
   const harness = createDashboardHarness({
-    storedKey: 'stored-admin-key',
+    loginKey: 'stored-admin-key',
     fetchOverride(route, options) {
       if (route === '/admin/models' && !options.method) {
         modelLoads += 1;
@@ -1598,7 +1670,7 @@ test('discover models opens locked create mode and accepts only returned identif
   const provider = dashboardProvider();
   const discovered = [{ model_name: '<img src=x onerror=1>' }, { model_name: 'safe-model' }];
   const harness = createDashboardHarness({
-    storedKey: 'stored-admin-key',
+    loginKey: 'stored-admin-key',
     fetchOverride(route, options) {
       if (route === '/admin/providers') return response([provider]);
       if (route === '/admin/providers/7/discover-models') return response(discovered);
@@ -1641,7 +1713,7 @@ test('discover models opens locked create mode and accepts only returned identif
 
 test('empty model discovery reports status without opening a dialog', async () => {
   const harness = createDashboardHarness({
-    storedKey: 'stored-admin-key',
+    loginKey: 'stored-admin-key',
     fetchOverride(route) {
       if (route === '/admin/providers') return response([dashboardProvider()]);
       if (route === '/admin/providers/7/discover-models') return response([]);
@@ -1663,7 +1735,7 @@ test('model deactivation and hard deletion use named confirmation', async () => 
   const inactive = dashboardModel({ id: 42, model_name: 'inactive-model', is_active: false });
   let deleted = false;
   const harness = createDashboardHarness({
-    storedKey: 'stored-admin-key',
+    loginKey: 'stored-admin-key',
     fetchOverride(route, options) {
       if (route === '/admin/models' && !options.method) return response(deleted ? [inactive] : [active, inactive]);
       if (route === '/admin/providers') return response([dashboardProvider()]);
@@ -1707,7 +1779,7 @@ test('model delete guards keep the confirmation open with the server error', asy
   const model = dashboardModel({ id: 51, model_name: 'assigned-<model>' });
   const error = '<script>Model is assigned to users</script>';
   const harness = createDashboardHarness({
-    storedKey: 'stored-admin-key',
+    loginKey: 'stored-admin-key',
     fetchOverride(route, options) {
       if (route === '/admin/models') return response([model]);
       if (route === '/admin/providers') return response([dashboardProvider()]);
@@ -1734,7 +1806,7 @@ test('model delete guards keep the confirmation open with the server error', asy
 
 test('stale discovery response cannot overwrite a normal model create dialog', async () => {
   const delayed = deferred();
-  const harness = createDashboardHarness({ storedKey: 'stored-admin-key', fetchOverride(route) {
+  const harness = createDashboardHarness({ loginKey: 'stored-admin-key', fetchOverride(route) {
     if (route === '/admin/providers') return response([dashboardProvider()]);
     if (route === '/admin/providers/7/discover-models') return delayed.promise;
     return undefined;
@@ -1760,7 +1832,7 @@ test('stale discovery response cannot overwrite a normal model create dialog', a
 test('out-of-order model discovery applies only the latest provider response', async () => {
   const delayedA = deferred(), delayedB = deferred();
   const providerA = dashboardProvider(), providerB = dashboardProvider({ id: 8, provider_name: 'provider-b', display_name: 'Provider B' });
-  const harness = createDashboardHarness({ storedKey: 'stored-admin-key', fetchOverride(route) {
+  const harness = createDashboardHarness({ loginKey: 'stored-admin-key', fetchOverride(route) {
     if (route === '/admin/providers') return response([providerA, providerB]);
     if (route === '/admin/providers/7/discover-models') return delayedA.promise;
     if (route === '/admin/providers/8/discover-models') return delayedB.promise;
@@ -1785,7 +1857,7 @@ test('out-of-order model discovery applies only the latest provider response', a
 
 test('model discovery cancel and success restore the logical Discover models trigger', async () => {
   const provider = dashboardProvider();
-  const cancelHarness = createDashboardHarness({ storedKey: 'stored-admin-key', fetchOverride(route) {
+  const cancelHarness = createDashboardHarness({ loginKey: 'stored-admin-key', fetchOverride(route) {
     if (route === '/admin/providers') return response([provider]);
     if (route === '/admin/providers/7/discover-models') return response([{ model_name: 'cancel-model' }]);
     return undefined;
@@ -1798,7 +1870,7 @@ test('model discovery cancel and success restore the logical Discover models tri
   assert.equal(cancelTrigger.focusCount, 1);
   assert.equal(cancelHarness.createModel.focusCount, 0);
 
-  const successHarness = createDashboardHarness({ storedKey: 'stored-admin-key', fetchOverride(route, options) {
+  const successHarness = createDashboardHarness({ loginKey: 'stored-admin-key', fetchOverride(route, options) {
     if (route === '/admin/providers') return response([provider]);
     if (route === '/admin/providers/7/discover-models') return response([{ model_name: 'registered-model' }]);
     if (route === '/admin/models' && options.method === 'POST') return response(dashboardModel({ model_name: 'registered-model' }));
