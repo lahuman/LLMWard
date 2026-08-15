@@ -102,8 +102,57 @@
     const assigned = Array.isArray(filter.model_ids) ? filter.model_ids.length : 0;
     return assigned ? 'Active for ' + assigned + ' models' : 'Active but no models assigned';
   }
+  function overviewResourceCounts() {
+    const activeProviderIds = new Set(
+      state.providers.filter((provider) => provider.is_active).map((provider) => provider.id),
+    );
+    const availableModels = state.models.filter(
+      (model) => model.is_active && activeProviderIds.has(model.provider_id),
+    );
+    const availableModelIds = new Set(availableModels.map((model) => model.id));
+    return {
+      users: state.users.filter((user) => user.is_active && user.permissions_valid).length,
+      policies: (state.builtInPii && state.builtInPii.is_active ? 1 : 0)
+        + state.filters.filter((filter) => {
+          if (!filter.is_active) return false;
+          if (filter.is_global) return true;
+          return (filter.model_ids || []).some((modelId) => availableModelIds.has(modelId));
+        }).length,
+      models: availableModels.length,
+      providers: activeProviderIds.size,
+    };
+  }
+  function providerHealthText(provider) {
+    const parts = [provider.health_status || 'Unknown'];
+    if (provider.last_health_latency_ms !== null && provider.last_health_latency_ms !== undefined) {
+      parts.push(number(provider.last_health_latency_ms) + ' ms');
+    }
+    if (provider.last_health_check) parts.push(formatDate(provider.last_health_check));
+    if (!provider.is_active) parts.push('Inactive');
+    return parts.join(' \u00b7 ');
+  }
+  function renderOverviewConfiguration() {
+    const counts = overviewResourceCounts();
+    for (const name of ['users', 'policies', 'models', 'providers']) {
+      el('overview-' + name + '-count').textContent = String(counts[name]);
+    }
+    if (!state.providers.length) {
+      el('overview-providers-content').replaceChildren(node('p', T.empty, 'empty'));
+      return;
+    }
+    const list = node('ul', undefined, 'provider-snapshot');
+    state.providers.forEach((provider) => {
+      const item = node('li');
+      item.append(
+        node('strong', provider.display_name || provider.provider_name),
+        node('span', providerHealthText(provider), 'operational-value'),
+      );
+      list.append(item);
+    });
+    el('overview-providers-content').replaceChildren(list);
+  }
   function statsPath(){const form=new FormData(el('stats-form')),range=String(form.get('range'));const query=new URLSearchParams({range});if(range==='custom'){query.set('start',String(form.get('start')));query.set('end',String(form.get('end')))}return `/admin/stats?${query}`}
-  async function loadAll(){showStatus(T.loading);const[users,models,providers,filters,builtInPii,onboarding,presets]=await Promise.all([api('/admin/users'),api('/admin/models'),api('/admin/providers'),api('/admin/filters'),api('/admin/filters/built-in-pii'),api('/admin/onboarding'),api('/admin/provider-presets')]);state.users=users;state.models=models;state.providers=providers;state.filters=filters;state.builtInPii=builtInPii;state.presets=presets;actionButtons.clear();renderUsers();renderModels();renderProviders();populateFilterModels();renderBuiltInPii();renderFilters();renderOnboarding(onboarding);populateProviders();populatePresets();clearStatus()}
+  async function loadAll(){showStatus(T.loading);const[users,models,providers,filters,builtInPii,onboarding,presets]=await Promise.all([api('/admin/users'),api('/admin/models'),api('/admin/providers'),api('/admin/filters'),api('/admin/filters/built-in-pii'),api('/admin/onboarding'),api('/admin/provider-presets')]);state.users=users;state.models=models;state.providers=providers;state.filters=filters;state.builtInPii=builtInPii;state.presets=presets;renderOverviewConfiguration();actionButtons.clear();renderUsers();renderModels();renderProviders();populateFilterModels();renderBuiltInPii();renderFilters();renderOnboarding(onboarding);populateProviders();populatePresets();clearStatus()}
   async function loadStats(){renderStats(await api(statsPath()))}
   async function loadInitial(){const[configuration,statistics]=await Promise.allSettled([loadAll(),loadStats()]);if(configuration.status==='rejected')throw configuration.reason;if(statistics.status==='rejected')throw statistics.reason}
   function renderOnboarding(onboarding){const section=el('onboarding');section.classList.toggle('hidden',onboarding.complete);const list=node('ol');onboarding.steps.forEach((step)=>list.append(node('li',`${step.complete?'✓':'○'} ${step.label}`)));const example=node('pre',onboarding.example);el('onboarding-content').replaceChildren(list,example)}
@@ -132,6 +181,13 @@
   function populateProviders(){const select=el('model-form').elements.providerId;select.replaceChildren();state.providers.forEach((provider)=>{const option=node('option',`${provider.display_name} (${provider.provider_name})`);option.value=String(provider.id);select.append(option)})}
   function populatePresets(){const select=el('provider-form').elements.preset;select.replaceChildren();const custom=node('option','Custom');custom.value='';select.append(custom);state.presets.forEach((preset)=>{const option=node('option',preset.name);option.value=preset.id;select.append(option)})}
   document.querySelectorAll('nav [data-tab]').forEach((item)=>item.addEventListener('click',()=>selectSection(item.dataset.tab)));
+  document.querySelectorAll('[data-overview-target]').forEach((item) => {
+    item.addEventListener('click', () => {
+      const target = item.dataset.overviewTarget;
+      selectSection(target);
+      el('tab-button-' + target).focus();
+    });
+  });
   el('create-user').addEventListener('click',(event)=>openUserCreate(event.currentTarget));
   el('create-model').addEventListener('click',(event)=>openModelCreate(event.currentTarget));
   el('create-provider').addEventListener('click',(event)=>openProviderCreate(event.currentTarget));

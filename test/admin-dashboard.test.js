@@ -252,7 +252,11 @@ function createDashboardHarness({
       if (!elements.has(id)) elements.set(id, new FakeNode());
       return elements.get(id);
     },
-    querySelectorAll: (selector) => selector === 'nav [data-tab]' ? navButtons : [],
+    querySelectorAll: (selector) => {
+      if (selector === 'nav [data-tab]') return navButtons;
+      if (selector === '[data-overview-target]') return overviewNodes;
+      return [];
+    },
     createElement(tagName) {
       const node = new FakeNode();
       node.tagName = String(tagName).toUpperCase();
@@ -274,6 +278,23 @@ function createDashboardHarness({
     tabs[name] = register('tab-' + name);
     return item;
   });
+  const overviewNodes = [
+    ['overview-users', 'users'],
+    ['overview-policies', 'filters'],
+    ['overview-models', 'models'],
+    ['overview-providers', 'providers'],
+  ].map(([id, target]) => {
+    const item = register(id);
+    item.type = 'button';
+    item.dataset.overviewTarget = target;
+    item.setAttribute('aria-controls', 'tab-' + target);
+    return item;
+  });
+  for (const id of [
+    'overview-users-count', 'overview-policies-count', 'overview-models-count', 'overview-providers-count',
+    'overview-stats-content', 'overview-providers-content', 'overview-activity-content',
+    'stats-content', 'usage-content', 'model-stats-content', 'provider-stats-content', 'request-content',
+  ]) register(id);
   register('section-title');
 
   for (const id of ['user-dialog', 'model-dialog', 'provider-dialog', 'confirm-dialog']) register(id, new FakeDialog());
@@ -371,6 +392,7 @@ function createDashboardHarness({
     dashboard: document.getElementById('dashboard'),
     signOut: document.getElementById('sign-out'),
     navButtons,
+    overviewNodes,
     sectionTitle: document.getElementById('section-title'),
     tabs,
     userForm,
@@ -387,6 +409,18 @@ function createDashboardHarness({
     modelsContent: document.getElementById('models-content'),
     providersContent: document.getElementById('providers-content'),
     filtersContent: document.getElementById('filters-content'),
+    overviewUsersCount: document.getElementById('overview-users-count'),
+    overviewPoliciesCount: document.getElementById('overview-policies-count'),
+    overviewModelsCount: document.getElementById('overview-models-count'),
+    overviewProvidersCount: document.getElementById('overview-providers-count'),
+    overviewProvidersContent: document.getElementById('overview-providers-content'),
+    overviewStatsContent: document.getElementById('overview-stats-content'),
+    overviewActivityContent: document.getElementById('overview-activity-content'),
+    statsContent: document.getElementById('stats-content'),
+    usageContent: document.getElementById('usage-content'),
+    modelStatsContent: document.getElementById('model-stats-content'),
+    providerStatsContent: document.getElementById('provider-stats-content'),
+    requestContent: document.getElementById('request-content'),
     createUser: document.getElementById('create-user'),
     createModel: document.getElementById('create-model'),
     createProvider: document.getElementById('create-provider'),
@@ -552,6 +586,52 @@ test('Signal Grid navigation selects Filters after authentication', async () => 
   assert.equal(harness.sectionTitle.textContent, 'Filters');
   assert.equal(harness.tabs.filters.classList.contains('hidden'), false);
   assert.equal(harness.tabs.overview.classList.contains('hidden'), true);
+});
+test('Gateway overview derives effective resources and transfers focus to Models', async () => {
+  const harness = createDashboardHarness({
+    loginKey: 'admin-key',
+    fetchOverride(route) {
+      if (route === '/admin/users') return response([
+        { username: 'usable', is_active: true, permissions_valid: true },
+        { username: 'invalid', is_active: true, permissions_valid: false },
+        { username: 'inactive', is_active: false, permissions_valid: true },
+      ]);
+      if (route === '/admin/providers') return response([
+        dashboardProvider({ id: 11, provider_name: 'active-one', display_name: 'Active one', health_status: 'Healthy', last_health_latency_ms: 14, last_health_check: '2026-08-15T01:00:00.000Z', base_url: 'https://provider.example/credential', stored_api_key: 'provider-secret' }),
+        dashboardProvider({ id: 12, provider_name: 'active-two', display_name: 'Active two' }),
+        dashboardProvider({ id: 13, provider_name: 'inactive', display_name: 'Inactive', is_active: false, base_url: 'https://inactive.example/private' }),
+      ]);
+      if (route === '/admin/models') return response([
+        dashboardModel({ id: 101, provider_id: 11 }),
+        dashboardModel({ id: 102, provider_id: 12, is_active: false }),
+        dashboardModel({ id: 103, provider_id: 13 }),
+      ]);
+      if (route === '/admin/filters') return response([
+        { name: 'global', patterns: [], is_active: true, is_global: true, model_ids: [] },
+        { name: 'available', patterns: [], is_active: true, is_global: false, model_ids: [101] },
+        { name: 'inactive', patterns: [], is_active: false, is_global: true, model_ids: [] },
+        { name: 'empty', patterns: [], is_active: true, is_global: false, model_ids: [] },
+        { name: 'unavailable', patterns: [], is_active: true, is_global: false, model_ids: [102, 103] },
+      ]);
+      if (route === '/admin/filters/built-in-pii') return response({ id: 'built-in-pii', is_active: true, rules: [] });
+      return undefined;
+    },
+  });
+  await settle();
+
+  assert.equal(harness.overviewUsersCount.textContent, '1');
+  assert.equal(harness.overviewPoliciesCount.textContent, '3');
+  assert.equal(harness.overviewModelsCount.textContent, '1');
+  assert.equal(harness.overviewProvidersCount.textContent, '2');
+  assert.equal(harness.overviewProvidersContent.children[0].tagName, 'UL');
+  assert.equal(collectText(harness.overviewProvidersContent).includes('provider-secret'), false);
+  assert.equal(collectText(harness.overviewProvidersContent).includes('https://provider.example/credential'), false);
+
+  const modelsNav = harness.navButtons.find((item) => item.dataset.tab === 'models');
+  harness.overviewNodes.find((item) => item.dataset.overviewTarget === 'models').dispatchEvent(new Event('click'));
+  assert.equal(harness.navButtons.filter((item) => item.getAttribute('aria-current') === 'page').map((item) => item.dataset.tab).join(','), 'models');
+  assert.equal(harness.tabs.models.classList.contains('hidden'), false);
+  assert.equal(modelsNav.focusCount, 1);
 });
 
 
