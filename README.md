@@ -69,6 +69,29 @@ docker compose up --build -d
 
 Compose는 Gateway 한 서비스만 실행합니다. PostgreSQL, MySQL, Redis는 사용하지 않습니다.
 
+### Docker 스트레스 검증
+
+배포 이미지가 실제 컨테이너 경로에서 동작하는지는 다음 명령으로 검증합니다.
+
+```bash
+npm run stress:docker
+```
+
+이 명령은 임의의 일회성 관리자 키와 이름이 충돌하지 않는 Compose 프로젝트를 만들고, production Gateway 이미지·격리된 로컬 mock provider·부하 생성기 컨테이너를 함께 실행한 뒤 모두 제거합니다. 운영 DB, 외부 모델, 실제 프롬프트나 자격증명은 사용하지 않습니다. 기본 시험은 8 ms 응답 지연 mock provider에 짧은 합성 요청을 1/10/50/100 동시성으로 각각 3회 보내고, 성공률·처리량·p50/p95/max 지연, SSE `[DONE]`, 모델 동시성 제한의 `200`/`429` 동작을 확인합니다.
+
+원본 JSON과 측정 한계, 최근 실측값은 [Docker stress benchmark](docs/BENCHMARK.md#docker-stress-benchmark)를 참조하십시오. 결과는 특정 하드웨어나 실제 모델의 성능 보장이 아닙니다.
+
+2026-08-18에 Docker/Node v22.23.2/linux arm64에서 실행한 최근 결과입니다. Gateway는 production 이미지이고 provider는 8 ms 지연의 격리 mock입니다.
+
+| 동시성 | 요청 / 성공 | 처리량 | p50 / p95 / 최대 지연 |
+|---:|---:|---:|---:|
+| 1 | 3 / 3 | 75.35 req/s | 13.13 / 13.60 / 13.60 ms |
+| 10 | 30 / 30 | 518.29 req/s | 17.42 / 18.97 / 19.89 ms |
+| 50 | 150 / 150 | 633.30 req/s | 53.33 / 85.54 / 97.53 ms |
+| 100 | 300 / 300 | 1,023.81 req/s | 60.93 / 104.58 / 108.97 ms |
+
+총 483개 요청이 모두 HTTP 200이었고, SSE는 HTTP 200과 `[DONE]`을 수신했습니다. 별도의 제한 모델 동시 요청은 HTTP 200 한 건과 429 한 건으로 제한이 작동함을 확인했습니다. [원본 결과 JSON](docs/benchmarks/2026-08-18-docker-stress.json)을 함께 보관합니다.
+
 ## 안전한 기본 동작
 
 - 사용자 토큰은 SHA-256 해시만 DB에 저장하며 원문은 발급 시 한 번만 반환합니다.
@@ -117,11 +140,12 @@ Generic OpenAI-compatible, Ollama, vLLM, LM Studio, llama.cpp server, LocalAI, N
 npm.cmd test
 npm.cmd audit --omit=dev
 npm.cmd run benchmark
+npm run stress:docker
 ```
 
 테스트와 벤치마크는 로컬 mock provider와 임시 SQLite DB만 사용합니다. 운영 `data/gateway.db`나 인터넷 공급자에 의존하지 않습니다.
 
-자세한 문서: [관리자 콘솔 설계](docs/superpowers/specs/2026-08-14-signal-grid-admin-redesign-design.md), [API](docs/API.md), [호환성](docs/COMPATIBILITY.md), [백업/복구](docs/BACKUP_RESTORE.md), [위협 모델](docs/THREAT_MODEL.md), [마이그레이션](docs/MIGRATIONS.md), [벤치마크](docs/BENCHMARK.md).
+자세한 문서: [관리자 콘솔 설계](docs/superpowers/specs/2026-08-14-signal-grid-admin-redesign-design.md), [API](docs/API.md), [호환성](docs/COMPATIBILITY.md), [백업/복구](docs/BACKUP_RESTORE.md), [위협 모델](docs/THREAT_MODEL.md), [마이그레이션](docs/MIGRATIONS.md), [벤치마크](docs/BENCHMARK.md), [15초 아키텍처 데모 영상](docs/assets/llmward-architecture-demo.mp4), [영상 제작 노트](docs/DEMO_VIDEO.md).
 
 ## 비목표
 

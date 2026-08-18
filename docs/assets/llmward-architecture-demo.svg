@@ -1,0 +1,55 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="900" viewBox="0 0 1600 900" role="img" aria-labelledby="title desc">
+  <title id="title">LLMWard Gateway architecture</title>
+  <desc id="desc">Clients use an OpenAI-compatible API through LLMWard. The gateway applies authentication, quotas, concurrency limits and filters before sending requests to registered providers. SQLite stores configuration and metadata, not prompts or generated content.</desc>
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#0b1120"/><stop offset="1" stop-color="#18263a"/></linearGradient>
+    <linearGradient id="gateway" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#1d4ed8"/><stop offset="1" stop-color="#0e7490"/></linearGradient>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="160%"><feDropShadow dx="0" dy="12" stdDeviation="14" flood-color="#020617" flood-opacity=".46"/></filter>
+    <marker id="arrow" markerWidth="12" markerHeight="12" refX="10" refY="6" orient="auto"><path d="M0,0 L12,6 L0,12z" fill="#5eead4"/></marker>
+    <style>
+      .h { font-family: Arial, Helvetica, sans-serif; fill: #f8fafc; font-weight: 700; }
+      .t { font-family: Arial, Helvetica, sans-serif; fill: #cbd5e1; font-size: 24px; }
+      .s { font-family: Arial, Helvetica, sans-serif; fill: #94a3b8; font-size: 19px; }
+      .small { font-family: Arial, Helvetica, sans-serif; fill: #cbd5e1; font-size: 18px; }
+      .box { fill: #111c2d; stroke: #334155; stroke-width: 2; }
+    </style>
+  </defs>
+  <rect width="1600" height="900" fill="url(#bg)"/>
+  <text x="100" y="104" class="h" font-size="52">LLMWard Gateway</text>
+  <text x="102" y="145" class="t">On-premises LLM access control for small organizations</text>
+  <g filter="url(#shadow)">
+    <rect x="100" y="255" width="300" height="250" rx="22" class="box"/>
+    <text x="250" y="330" class="h" font-size="31" text-anchor="middle">Clients</text>
+    <text x="250" y="376" class="t" text-anchor="middle">OpenAI SDK</text>
+    <text x="250" y="414" class="t" text-anchor="middle">OpenWebUI / curl</text>
+    <text x="250" y="462" class="s" text-anchor="middle">/v1/models</text>
+    <text x="250" y="490" class="s" text-anchor="middle">/v1/chat/completions + SSE</text>
+    <rect x="540" y="205" width="520" height="390" rx="28" fill="url(#gateway)" stroke="#67e8f9" stroke-width="2"/>
+    <text x="800" y="278" class="h" font-size="38" text-anchor="middle">LLMWard Gateway</text>
+    <text x="800" y="323" class="t" text-anchor="middle">single process · single server</text>
+    <line x1="600" y1="356" x2="1000" y2="356" stroke="#7dd3fc" stroke-opacity=".6"/>
+    <text x="800" y="405" class="small" text-anchor="middle">User tokens · quotas · RPM · concurrency</text>
+    <text x="800" y="445" class="small" text-anchor="middle">Registered routes · literal filters · Korean PII / secret filter</text>
+    <text x="800" y="493" class="small" text-anchor="middle">OpenAI-compatible routing · streaming lifecycle cleanup</text>
+    <text x="800" y="550" class="s" text-anchor="middle">Prompt and generated content are not stored</text>
+    <rect x="1200" y="255" width="300" height="250" rx="22" class="box"/>
+    <text x="1350" y="330" class="h" font-size="31" text-anchor="middle">Registered providers</text>
+    <text x="1350" y="376" class="t" text-anchor="middle">Ollama · vLLM</text>
+    <text x="1350" y="414" class="t" text-anchor="middle">LM Studio · NIM</text>
+    <text x="1350" y="462" class="s" text-anchor="middle">approved Base URL only</text>
+    <text x="1350" y="490" class="s" text-anchor="middle">no client Authorization forwarding</text>
+    <rect x="530" y="690" width="540" height="115" rx="22" class="box"/>
+    <text x="800" y="742" class="h" font-size="30" text-anchor="middle">SQLite metadata</text>
+    <text x="800" y="778" class="small" text-anchor="middle">users, hashed tokens, models, quotas, usage summaries, audit metadata</text>
+  </g>
+  <path d="M410 365 H520" stroke="#5eead4" stroke-width="7" stroke-linecap="round" marker-end="url(#arrow)"/>
+  <path d="M1070 365 H1180" stroke="#5eead4" stroke-width="7" stroke-linecap="round" marker-end="url(#arrow)"/>
+  <path d="M800 605 V672" stroke="#5eead4" stroke-width="7" stroke-linecap="round" marker-end="url(#arrow)"/>
+  <text x="465" y="335" class="small" text-anchor="middle">authenticated request</text>
+  <text x="1125" y="335" class="small" text-anchor="middle">approved upstream request</text>
+  <text x="842" y="652" class="small">configuration + metadata</text>
+  <rect x="100" y="620" width="320" height="120" rx="18" fill="#153129" stroke="#2dd4bf" stroke-width="2"/>
+  <text x="260" y="668" class="h" font-size="22" text-anchor="middle">Privacy boundary</text>
+  <text x="260" y="706" class="small" text-anchor="middle">No prompt, message array, response body,</text>
+  <text x="260" y="732" class="small" text-anchor="middle">provider error body, or raw token persistence</text>
+</svg>

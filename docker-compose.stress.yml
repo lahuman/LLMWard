@@ -1,0 +1,48 @@
+services:
+  mock-provider:
+    image: node:22-bookworm-slim
+    command: ["node", "/work/docker/stress/mock-provider.js"]
+    working_dir: /work
+    volumes:
+      - ./:/work:ro
+    environment:
+      MOCK_PROVIDER_DELAY_MS: "8"
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8080/v1/models').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+      interval: 2s
+      timeout: 2s
+      retries: 15
+
+  gateway:
+    build: .
+    image: llmward-stress-gateway
+    environment:
+      ADMIN_SECRET_KEY: ${LLMWARD_STRESS_ADMIN_KEY:?A generated stress-test key is required}
+      DATABASE_PATH: /app/data/gateway.db
+      CORS_ORIGIN: http://localhost:3000
+      LOG_LEVEL: silent
+    volumes:
+      - stress-data:/app/data
+    depends_on:
+      mock-provider:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/health').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+      interval: 2s
+      timeout: 2s
+      retries: 15
+
+  stress:
+    image: llmward-stress-gateway
+    command: ["node", "scripts/docker-stress.js"]
+    environment:
+      ADMIN_SECRET_KEY: ${LLMWARD_STRESS_ADMIN_KEY:?A generated stress-test key is required}
+      GATEWAY_URL: http://gateway:3000
+      STRESS_CONCURRENCIES: ${STRESS_CONCURRENCIES:-1,10,50,100}
+      STRESS_ROUNDS: ${STRESS_ROUNDS:-3}
+    depends_on:
+      gateway:
+        condition: service_healthy
+
+volumes:
+  stress-data:

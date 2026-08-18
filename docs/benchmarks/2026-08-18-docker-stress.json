@@ -1,0 +1,58 @@
+{
+  "schema_version": 1,
+  "measured_at": "2026-08-18T11:20:50.824Z",
+  "environment": {
+    "runner": "Docker, Node v22.23.2, linux arm64",
+    "gateway": "LLMWard production Docker image",
+    "provider": "isolated local mock provider with an 8 ms response delay"
+  },
+  "workload": {
+    "concurrencies": [1, 10, 50, 100],
+    "rounds_per_concurrency": 3,
+    "request_body": "one short synthetic chat message; max_tokens=1"
+  },
+  "scenarios": [
+    {
+      "concurrency": 1,
+      "rounds": 3,
+      "requests": 3,
+      "successful": 3,
+      "status_counts": { "200": 3 },
+      "elapsed_ms": 39.82,
+      "throughput_requests_per_second": 75.35,
+      "latency_ms": { "p50": 13.13, "p95": 13.6, "max": 13.6 }
+    },
+    {
+      "concurrency": 10,
+      "rounds": 3,
+      "requests": 30,
+      "successful": 30,
+      "status_counts": { "200": 30 },
+      "elapsed_ms": 57.88,
+      "throughput_requests_per_second": 518.29,
+      "latency_ms": { "p50": 17.42, "p95": 18.97, "max": 19.89 }
+    },
+    {
+      "concurrency": 50,
+      "rounds": 3,
+      "requests": 150,
+      "successful": 150,
+      "status_counts": { "200": 150 },
+      "elapsed_ms": 236.85,
+      "throughput_requests_per_second": 633.3,
+      "latency_ms": { "p50": 53.33, "p95": 85.54, "max": 97.53 }
+    },
+    {
+      "concurrency": 100,
+      "rounds": 3,
+      "requests": 300,
+      "successful": 300,
+      "status_counts": { "200": 300 },
+      "elapsed_ms": 293.02,
+      "throughput_requests_per_second": 1023.81,
+      "latency_ms": { "p50": 60.93, "p95": 104.58, "max": 108.97 }
+    }
+  ],
+  "streaming": { "status": 200, "received_done": true },
+  "concurrency_limit_statuses": [200, 429]
+}

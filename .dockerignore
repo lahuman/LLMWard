@@ -41,10 +41,12 @@ backups
 *.log
 *.out
 *.err
+*.mp4
 npm-debug.log*
 **/*.log
 **/*.out
 **/*.err
+**/*.mp4
 **/npm-debug.log*
 
 .agents

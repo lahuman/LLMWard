@@ -13,6 +13,7 @@
     "doctor": "node scripts/doctor.js",
     "backup": "node scripts/backup.js",
     "benchmark": "node scripts/benchmark.js",
+    "stress:docker": "node scripts/run-docker-stress.js",
     "verify-backup": "node scripts/verify-backup.js"
   },
   "license": "MIT",

@@ -248,9 +248,9 @@ test('package metadata requires Node 22', () => {
   assert.equal(packageLock.packages[''].engines.node, '>=22');
 });
 
-test('container artifacts use Node 22 and a single hardened gateway service', () => {
+test('container artifacts use a supported Node 22 runtime and a single hardened gateway service', () => {
   const dockerfile = fs.readFileSync(path.join(repositoryRoot, 'Dockerfile'), 'utf8');
-  assert.match(dockerfile, /^FROM node:22-bookworm-slim\s*$/m);
+  assert.match(dockerfile, /^FROM node:22-trixie-slim\s*$/m);
   assert.match(dockerfile, /^USER node\s*$/m);
   assert.match(dockerfile, /^VOLUME \["\/app\/data"\]\s*$/m);
   assert.match(dockerfile, /^HEALTHCHECK\s+/m);
@@ -288,12 +288,12 @@ test('Docker build context excludes secrets, runtime data, and local artifacts',
     'node_modules', '.git', 'data', '.env', '.env.*',
     'coverage', '.nyc_output', '*.db', '*.sqlite', '*.sqlite3',
     '*.db-wal', '*.db-shm', '*-wal', '*-shm', '*-journal', '*.bak', '*.backup', 'backups',
-    '*.log', '*.out', '*.err', 'npm-debug.log*',
+    '*.log', '*.out', '*.err', '*.mp4', 'npm-debug.log*',
     '.agents', '.codex', '.superpowers', '.idea', '.vscode',
     '**/node_modules', '**/.git', '**/data', '**/.env', '**/.env.*',
     '**/coverage', '**/.nyc_output', '**/*.db', '**/*.sqlite', '**/*.sqlite3',
     '**/*.db-wal', '**/*.db-shm', '**/*-wal', '**/*-shm', '**/*-journal', '**/*.bak', '**/*.backup',
-    '**/backups', '**/*.log', '**/*.out', '**/*.err', '**/npm-debug.log*',
+    '**/backups', '**/*.log', '**/*.out', '**/*.err', '**/*.mp4', '**/npm-debug.log*',
     '**/.agents', '**/.codex', '**/.superpowers', '**/.idea', '**/.vscode'
   ]) {
     assert.equal(ignored.has(entry), true, `.dockerignore must exclude ${entry}`);
