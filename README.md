@@ -12,7 +12,8 @@
 
 ## 10분 Quick Start
 
-Node.js 22 이상이 필요합니다.
+Node.js 22.23.4 이상(22.x), 24.22.1 이상(24.x), 또는 26.12.1 이상(26.x)이 필요합니다.
+2026-10-21 [Node.js 보안 업데이트](https://nodejs.org/en/blog/vulnerability/october-2026-security-releases)가 적용된 최소 버전입니다. Docker와 CI는 22.23.4를 사용합니다.
 
 ```powershell
 npm.cmd install
@@ -68,6 +69,8 @@ docker compose up --build -d
 ```
 
 Compose는 Gateway 한 서비스만 실행합니다. PostgreSQL, MySQL, Redis는 사용하지 않습니다.
+
+기존 Docker 배포에 보안 패치를 적용하려면 `docker compose build --pull` 후 `docker compose up -d --force-recreate`로 컨테이너를 교체합니다. 실행 중인 컨테이너는 저장소 업데이트만으로 바뀌지 않습니다.
 
 ### Docker 스트레스 검증
 

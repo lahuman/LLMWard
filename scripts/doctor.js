@@ -48,8 +48,11 @@ function emit() {
   process.exitCode = checks.some((result) => result.status === 'fail') ? 1 : 0;
 }
 
-const major = Number(process.versions.node.split('.')[0]);
-check('Node.js version', major >= 22 ? 'pass' : 'fail', `major=${major}`);
+const [major, minor, patch] = process.versions.node.split('.').map(Number);
+// Minimum patched releases from the 2026-10-21 Node.js security advisory.
+const minimum = { 22: [23, 4], 24: [22, 1], 26: [12, 1] }[major];
+const supported = minimum && (minor > minimum[0] || (minor === minimum[0] && patch >= minimum[1]));
+check('Node.js version', supported ? 'pass' : 'fail', `version=${process.versions.node}`);
 
 let config;
 try {

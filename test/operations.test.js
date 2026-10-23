@@ -228,29 +228,46 @@ test('doctor warns without failing for low nonzero disk space', (t) => {
   assertPrefixedOutput(result);
 });
 
-test('CI uses read-only contents permission, Node 22, install, test, and production audit', () => {
+test('doctor rejects vulnerable and unsupported Node versions at each security patch boundary', (t) => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'llmward-node-version-'));
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  for (const [version, status] of [
+    ['20.20.2', 'FAIL'], ['22.23.3', 'FAIL'], ['22.23.4', 'PASS'], ['22.24.0', 'PASS'],
+    ['23.11.0', 'FAIL'], ['24.22.0', 'FAIL'], ['24.22.1', 'PASS'], ['24.23.0', 'PASS'],
+    ['25.9.0', 'FAIL'], ['26.12.0', 'FAIL'], ['26.12.1', 'PASS'], ['26.13.0', 'PASS']
+  ]) {
+    const preloadPath = writePreload(directory, `${version}.cjs`,
+      `Object.defineProperty(process.versions, 'node', { value: ${JSON.stringify(version)} });`);
+    // Invalid configuration exits before opening any database; only the runtime probe is exercised.
+    const result = runDoctor(path.join(directory, 'unused.db'), 'invalid', { preloadPath });
+    assert.equal(result.stdout.includes(`[${status}] Node.js version: version=${version}`), true, version);
+    assert.equal(fs.existsSync(path.join(directory, 'unused.db')), false);
+  }
+});
+
+test('CI uses read-only contents permission, patched Node 22, install, test, and production audit', () => {
   const workflow = fs.readFileSync(path.join(repositoryRoot, '.github', 'workflows', 'ci.yml'), 'utf8');
   assert.match(workflow, /^permissions:\r?\n  contents: read\s*$/m);
   assert.match(workflow, /^\s+- uses: actions\/checkout@v4\s*$/m);
   assert.match(workflow, /^\s+- uses: actions\/setup-node@v4\s*$/m);
-  assert.match(workflow, /^\s+node-version: 22\s*$/m);
+  assert.match(workflow, /^\s+node-version: 22\.23\.4\s*$/m);
   assert.match(workflow, /^\s+cache: npm\s*$/m);
   for (const command of ['npm ci', 'npm test', 'npm audit --omit=dev']) {
     assert.match(workflow, new RegExp(`^\\s+- run: ${command.replace(/[.*+?^${}()|[\\]\\]/g, '\\$&')}\\s*$`, 'm'));
   }
 });
 
-test('package metadata requires Node 22', () => {
+test('package metadata requires patched supported Node releases', () => {
   const packageJson = JSON.parse(fs.readFileSync(path.join(repositoryRoot, 'package.json'), 'utf8'));
   const packageLock = JSON.parse(fs.readFileSync(path.join(repositoryRoot, 'package-lock.json'), 'utf8'));
 
-  assert.equal(packageJson.engines.node, '>=22');
-  assert.equal(packageLock.packages[''].engines.node, '>=22');
+  assert.equal(packageJson.engines.node, '^22.23.4 || ^24.22.1 || ^26.12.1');
+  assert.equal(packageLock.packages[''].engines.node, packageJson.engines.node);
 });
 
 test('container artifacts use a supported Node 22 runtime and a single hardened gateway service', () => {
   const dockerfile = fs.readFileSync(path.join(repositoryRoot, 'Dockerfile'), 'utf8');
-  assert.match(dockerfile, /^FROM node:22-trixie-slim\s*$/m);
+  assert.match(dockerfile, /^FROM node:22\.23\.4-trixie-slim\s*$/m);
   assert.match(dockerfile, /^USER node\s*$/m);
   assert.match(dockerfile, /^VOLUME \["\/app\/data"\]\s*$/m);
   assert.match(dockerfile, /^HEALTHCHECK\s+/m);
